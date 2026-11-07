@@ -5,13 +5,15 @@ on:
   push:
     paths:
       - '.github/workflows/build-ipa.yml'
+      - 'EmulateurGBA/**'
+      - 'EmulateurGBA.xcodeproj/**'
 
 permissions:
   contents: read
 
 concurrency:
   group: retropal-ipa-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   build:
