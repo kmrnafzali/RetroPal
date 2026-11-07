@@ -27,6 +27,9 @@ struct AppShellView: View {
     /// 2026-09-08): a surface that read the window itself was never told
     /// when a game gave the status bar back.
     @State private var surfaceInsets: UIEdgeInsets?
+    /// Follow the actual window when a phone opens onto a larger inner display.
+    /// The hardware idiom alone stays phone across that size change.
+    @State private var surfaceSize: CGSize = .zero
 
     private func uiInsets(_ edges: EdgeInsets) -> UIEdgeInsets {
         let rtl = layoutDirection == .rightToLeft
@@ -123,11 +126,19 @@ struct AppShellView: View {
         .background(
             GeometryReader { geo in
                 Color.clear
-                    .onAppear { surfaceInsets = uiInsets(geo.safeAreaInsets) }
+                    .onAppear {
+                        surfaceInsets = uiInsets(geo.safeAreaInsets)
+                        surfaceSize = geo.size
+                    }
+                    .onChange(of: geo.size) { size in surfaceSize = size }
                     .onChange(of: geo.safeAreaInsets) { edges in surfaceInsets = uiInsets(edges) }
             }
         )
         .environment(\.surfaceSafeAreaInsets, surfaceInsets)
+        // Use the existing tablet surfaces on a large inner phone display.
+        // Folding back to a narrow window restores the phone surfaces.
+        .environment(\.surfaceIdiom,
+                     LayoutFamily.of(surfaceSize) == .tablet ? .pad : .current)
     }
 }
 
