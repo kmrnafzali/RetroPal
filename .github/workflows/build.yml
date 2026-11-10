@@ -1,0 +1,72 @@
+name: Build IPA
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Neueste stabile Xcode-Version wählen
+        shell: bash
+        run: |
+          XC=$(ls -d /Applications/Xcode_*.app | grep -v -i -E 'beta|_rc|preview' | sort -V | tail -1)
+          echo "Verwende $XC"
+          sudo xcode-select -s "$XC"
+          xcodebuild -version
+
+      - name: Xcode-Projekt erzeugen
+        shell: bash
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Bauen (unsigniert)
+        shell: bash
+        run: |
+          set +e
+          xcodebuild \
+            -project Lesen.xcodeproj \
+            -scheme Lesen \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            > build.log 2>&1
+          code=$?
+          grep -E "error:" build.log | sort -u | head -n 10 | while IFS= read -r line; do
+            echo "::error::${line}"
+          done
+          tail -n 8 build.log
+          exit $code
+
+      - name: IPA verpacken
+        shell: bash
+        run: |
+          APP=$(find build/Build/Products -maxdepth 3 -name "Lesen.app" | head -1)
+          echo "App: $APP"
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qr Lesen.ipa Payload
+          ls -lh Lesen.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Lesen-ipa
+          path: Lesen.ipa
+
+      - name: Release aktualisieren
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Neueste Version
+          body: Unsignierte IPA zum Installieren mit AltStore.
+          files: Lesen.ipa
