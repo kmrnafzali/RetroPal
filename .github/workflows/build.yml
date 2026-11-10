@@ -10,14 +10,19 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-latest
+    # Das iPhone Duo braucht das iOS-27.1-SDK, das es nur auf dem Xcode-27-Image gibt.
+    runs-on: xcode-27
     steps:
       - uses: actions/checkout@v4
 
       - name: Neueste stabile Xcode-Version wählen
         shell: bash
         run: |
-          XC=$(ls -d /Applications/Xcode_*.app | grep -v -i -E 'beta|_rc|preview' | sort -V | tail -1)
+          if [ -d /Applications/Xcode_27.1.app ]; then
+            XC=/Applications/Xcode_27.1.app
+          else
+            XC=$(ls -d /Applications/Xcode_*.app | grep -v -i -E 'beta|candidate|_rc|preview' | sort -V | tail -1)
+          fi
           sudo xcode-select -s "$XC"
           echo "::notice::Xcode: $(xcodebuild -version | tr '\n' ' ') | iOS-SDK: $(xcrun --sdk iphoneos --show-sdk-version) | vorhanden: $(ls /Applications | grep -i xcode | tr '\n' ' ')"
 
