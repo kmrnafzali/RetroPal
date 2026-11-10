@@ -110,9 +110,7 @@ final class Library: ObservableObject {
         Task {
             do {
                 let book = try await Task.detached(priority: .userInitiated) { () throws -> Book in
-                    let access = url.startAccessingSecurityScopedResource()
-                    defer { if access { url.stopAccessingSecurityScopedResource() } }
-                    return try EPUBParser.importEPUB(at: url, libraryRoot: root)
+                    try Library.importCopy(of: url, root: root)
                 }.value
                 withAnimation(.spring(response: 0.55, dampingFraction: 0.8)) {
                     books.insert(book, at: 0)
@@ -120,11 +118,43 @@ final class Library: ObservableObject {
                 save()
                 Haptics.success()
             } catch {
-                importError = (error as? EPUBError)?.errorDescription
-                    ?? "Die Datei konnte nicht gelesen werden. Es muss eine EPUB-Datei sein."
+                if let epubError = error as? EPUBError {
+                    importError = epubError.errorDescription
+                } else {
+                    importError = "Die Datei konnte nicht gelesen werden (\(error.localizedDescription))."
+                }
             }
             importing -= 1
         }
+    }
+
+    /// Kopiert die Datei zuerst in einen eigenen Ordner und importiert dann die Kopie.
+    /// So spielt es keine Rolle, ob sie aus der Dateien-App, iCloud oder einer anderen App kommt.
+    nonisolated static func importCopy(of url: URL, root: URL) throws -> Book {
+        let fm = FileManager.default
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        let access = url.startAccessingSecurityScopedResource()
+        defer { if access { url.stopAccessingSecurityScopedResource() } }
+
+        let staging = fm.temporaryDirectory.appendingPathComponent("import-\(UUID().uuidString).epub")
+        var coordinationError: NSError?
+        var copyError: Error?
+        NSFileCoordinator().coordinate(readingItemAt: url, options: [.withoutChanges], error: &coordinationError) { readable in
+            do {
+                try fm.copyItem(at: readable, to: staging)
+            } catch {
+                copyError = error
+            }
+        }
+        if let coordinationError { throw coordinationError }
+        if let copyError { throw copyError }
+        defer { try? fm.removeItem(at: staging) }
+
+        var book = try EPUBParser.importEPUB(at: staging, libraryRoot: root)
+        if book.title.hasPrefix("import-") {
+            book.title = url.deletingPathExtension().lastPathComponent
+        }
+        return book
     }
 
     // MARK: Bücher

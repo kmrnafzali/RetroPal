@@ -46,14 +46,6 @@ struct LibraryView: View {
     @State private var showPhotoPicker = false
     @State private var photoItem: PhotosPickerItem?
 
-    private var importTypes: [UTType] {
-        var types: [UTType] = []
-        if let epub = UTType("org.idpf.epub-container") { types.append(epub) }
-        if let byExtension = UTType(filenameExtension: "epub") { types.append(byExtension) }
-        types.append(.data)
-        return types
-    }
-
     private var visibleBooks: [Book] {
         let sorted = library.books.sorted {
             ($0.lastOpened ?? $0.addedAt) > ($1.lastOpened ?? $1.addedAt)
@@ -123,11 +115,11 @@ struct LibraryView: View {
             .coordinateSpace(name: "root")
             .onPreferenceChange(CoverFrameKey.self) { frameBox.frames = $0 }
         }
-        .fileImporter(isPresented: $showImporter, allowedContentTypes: importTypes,
-                      allowsMultipleSelection: true) { result in
-            if case .success(let urls) = result {
+        .sheet(isPresented: $showImporter) {
+            DocumentPicker { urls in
                 for url in urls { library.importBook(from: url) }
             }
+            .ignoresSafeArea()
         }
         .sheet(isPresented: $showStats) {
             StatsView()

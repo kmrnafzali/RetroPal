@@ -20,6 +20,7 @@ enum EPUBParser {
         let destination = libraryRoot.appendingPathComponent(id.uuidString, isDirectory: true)
         try fm.createDirectory(at: destination, withIntermediateDirectories: true)
         do {
+            guard (try? Archive(url: url, accessMode: .read)) != nil else { throw EPUBError.invalid }
             try fm.unzipItem(at: url, to: destination)
             var book = try parse(directory: destination)
             book.id = id
