@@ -115,11 +115,11 @@ struct ReaderView: View {
                     }
                     .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
                     .onAppear {
-                        configure(metrics, insets: insets, size: geo.size)
+                        configure(metrics, insets: insets, size: geo.size, holes: DuoFold.occlusions(geo))
                         noteGeometry(geo, metrics, insets: insets)
                     }
                     .onChange(of: metrics) { _, newMetrics in
-                        configure(newMetrics, insets: insets, size: geo.size)
+                        configure(newMetrics, insets: insets, size: geo.size, holes: DuoFold.occlusions(geo))
                         noteGeometry(geo, newMetrics, insets: insets)
                     }
                 }
@@ -280,18 +280,21 @@ struct ReaderView: View {
             full: geo.size,
             insets: UIEdgeInsets(top: top, left: raw.leading, bottom: bottom, right: raw.trailing),
             fold: DuoFold.fold(geo),
-            occlusions: DuoFold.occlusions(geo),
+            occlusions: insetMemory.size == geo.size
+                ? InsetMemory.merge(insetMemory.holes, DuoFold.occlusions(geo)) : DuoFold.occlusions(geo),
             margin: pageMargin
         )
     }
 
-    private func configure(_ metrics: ReaderMetrics, insets: EdgeInsets, size: CGSize) {
+    private func configure(_ metrics: ReaderMetrics, insets: EdgeInsets, size: CGSize, holes: [CGRect]) {
         var memory = insetMemory
         if memory.size != size {
-            memory = InsetMemory(size: size, top: insets.top, bottom: insets.bottom > 90 ? 34 : insets.bottom)
+            memory = InsetMemory(size: size, top: insets.top, bottom: insets.bottom > 90 ? 34 : insets.bottom,
+                                 holes: holes)
         } else {
             memory.top = max(memory.top, insets.top)
             if insets.bottom <= 90 { memory.bottom = insets.bottom }
+            memory.holes = InsetMemory.merge(memory.holes, holes)
         }
         if memory != insetMemory { insetMemory = memory }
         lastMetrics = metrics
@@ -602,6 +605,18 @@ struct InsetMemory: Equatable {
     var size = CGSize.zero
     var top: CGFloat = 0
     var bottom: CGFloat = 0
+    /// Einmal gesehene verdeckte Bereiche (z. B. das Statusfeld, das beim Ausblenden der Leiste verschwindet).
+    /// Sie bleiben reserviert, damit Ein- und Ausblenden das Buch nicht neu umbricht.
+    var holes: [CGRect] = []
+
+    static func merge(_ old: [CGRect], _ new: [CGRect]) -> [CGRect] {
+        var result = old
+        for rect in new where !result.contains(where: { abs($0.minX - rect.minX) < 2 && abs($0.minY - rect.minY) < 2
+            && abs($0.width - rect.width) < 2 && abs($0.height - rect.height) < 2 }) {
+            result.append(rect)
+        }
+        return result
+    }
 }
 
 enum LidPhase {

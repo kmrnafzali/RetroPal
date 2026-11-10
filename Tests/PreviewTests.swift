@@ -323,7 +323,8 @@ final class PreviewTests: XCTestCase {
                     XCTAssertTrue(safe.insetBy(dx: -0.5, dy: -0.5).contains(rect), "Text in der sicheren Fläche: \(label) \(rect) / \(safe)")
                     XCTAssertEqual(rect.size, layout.contentSize, label)
                     XCTAssertGreaterThan(rect.width, 200, label)
-                    if let fold = item.fold {
+                    // Ein flach aufgeklappter, quer liegender Falz ist kaum sichtbar und darf überlesen werden.
+                    if let fold = item.fold, fold.isActive || fold.frame.height > fold.frame.width {
                         XCTAssertFalse(rect.intersects(fold.frame), "Text im Falz: \(label)")
                     }
                     for hole in item.holes {
@@ -502,8 +503,16 @@ final class PreviewTests: XCTestCase {
                 note("\(tag): \(line)")
             }
             systemShot("\(tag)-lesen-mit-leiste")
+            let layoutBefore = model?.layout
+            let pageBefore = model?.index
             model?.chrome = false
             wait(1)
+            model?.chrome = true
+            wait(1)
+            model?.chrome = false
+            wait(1)
+            XCTAssertEqual(model?.layout, layoutBefore, "Leiste ein- und ausblenden darf nicht neu umbrechen (\(tag))")
+            XCTAssertEqual(model?.index, pageBefore, "Leiste ein- und ausblenden darf nicht blättern (\(tag))")
             capture(window, name: "\(tag)-lesen")
             systemShot("\(tag)-lesen-system")
             XCTAssertFalse(ReaderDiagnostics.shared.hasMismatch, "Seitenfläche und berechnete Seite müssen übereinstimmen (\(tag))")
