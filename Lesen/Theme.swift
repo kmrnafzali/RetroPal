@@ -50,3 +50,81 @@ extension UIColor {
         )
     }
 }
+
+/// Gespeicherte Auswahl. „Automatisch" folgt dem Hell-/Dunkelmodus des Geräts.
+enum ThemeChoice: String, CaseIterable, Identifiable {
+    case auto
+    case paper
+    case sepia
+    case dark
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .auto: return "Auto"
+        case .paper: return "Papier"
+        case .sepia: return "Sepia"
+        case .dark: return "Nacht"
+        }
+    }
+
+    func resolve(systemDark: Bool) -> ReadingTheme {
+        switch self {
+        case .auto: return systemDark ? .dark : .paper
+        case .paper: return .paper
+        case .sepia: return .sepia
+        case .dark: return .dark
+        }
+    }
+}
+
+enum ReadingFont: String, CaseIterable, Identifiable {
+    case iowan
+    case palatino
+    case georgia
+    case charter
+    case newYork
+    case sans
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .iowan: return "Iowan"
+        case .palatino: return "Palatino"
+        case .georgia: return "Georgia"
+        case .charter: return "Charter"
+        case .newYork: return "New York"
+        case .sans: return "San Francisco"
+        }
+    }
+
+    var css: String {
+        switch self {
+        case .iowan: return "'Iowan Old Style', Georgia, serif"
+        case .palatino: return "Palatino, 'Palatino Linotype', serif"
+        case .georgia: return "Georgia, serif"
+        case .charter: return "Charter, Georgia, serif"
+        case .newYork: return "ui-serif, 'New York', Georgia, serif"
+        case .sans: return "-apple-system, 'Helvetica Neue', sans-serif"
+        }
+    }
+
+    var preview: Font {
+        switch self {
+        case .iowan: return .custom("Iowan Old Style", size: 17)
+        case .palatino: return .custom("Palatino", size: 17)
+        case .georgia: return .custom("Georgia", size: 17)
+        case .charter: return .custom("Charter", size: 17)
+        case .newYork: return .system(size: 17, design: .serif)
+        case .sans: return .system(size: 17)
+        }
+    }
+}
+
+extension ReadingTheme {
+    var footerColor: UIColor {
+        UIColor(hex: textHex).withAlphaComponent(0.45)
+    }
+}

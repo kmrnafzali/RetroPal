@@ -1,24 +1,29 @@
 import SwiftUI
 import UIKit
 
-/// Blättert mit dem echten Seitenumblätter-Effekt (wie Apple Books).
+/// Blättert mit dem echten Seitenumblätter-Effekt.
+/// Im Doppelseiten-Modus liegt der Buchrücken in der Mitte wie bei einem aufgeschlagenen Buch.
 struct PagerView: UIViewControllerRepresentable {
     @ObservedObject var model: ReaderModel
+    let spread: Bool
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(model: model)
+        Coordinator(model: model, spread: spread)
     }
 
     func makeUIViewController(context: Context) -> UIPageViewController {
+        let spine: UIPageViewController.SpineLocation = spread ? .mid : .min
         let pager = UIPageViewController(
             transitionStyle: .pageCurl,
             navigationOrientation: .horizontal,
-            options: nil
+            options: [.spineLocation: NSNumber(value: spine.rawValue)]
         )
+        pager.isDoubleSided = spread
         pager.dataSource = context.coordinator
         pager.delegate = context.coordinator
-        pager.isDoubleSided = false
+        pager.view.backgroundColor = model.theme.background
         context.coordinator.pager = pager
+        context.coordinator.showPlaceholders()
 
         for recognizer in pager.gestureRecognizers where recognizer is UITapGestureRecognizer {
             recognizer.isEnabled = false
@@ -38,108 +43,120 @@ struct PagerView: UIViewControllerRepresentable {
     final class Coordinator: NSObject, UIPageViewControllerDataSource, UIPageViewControllerDelegate,
                              UIGestureRecognizerDelegate {
         let model: ReaderModel
+        let spread: Bool
         weak var pager: UIPageViewController?
+
         private var builtVersion = -1
         private var lastJump: UUID?
-        private var cache: [String: PageVC] = [:]
+        private var cache: [Int: PageVC] = [:]
         private var animating = false
 
-        init(model: ReaderModel) {
+        init(model: ReaderModel, spread: Bool) {
             self.model = model
+            self.spread = spread
+        }
+
+        /// Anzahl der Seiten inklusive einer leeren Schlussseite, damit die Doppelseite aufgeht.
+        private var limit: Int {
+            let total = model.totalPages
+            return spread ? total + total % 2 : total
         }
 
         // MARK: Zustand abgleichen
 
+        func showPlaceholders() {
+            guard let pager, let layout = placeholderLayout() else { return }
+            func blank(_ index: Int, _ side: PageSide) -> PageVC {
+                PageVC(index: index, info: nil, fileURL: nil, root: model.root, layout: layout,
+                       theme: model.theme, side: side)
+            }
+            let controllers = spread ? [blank(-2, .left), blank(-1, .right)] : [blank(-1, .single)]
+            pager.setViewControllers(controllers, direction: .forward, animated: false, completion: nil)
+        }
+
+        private func placeholderLayout() -> PageLayout? {
+            model.layout ?? PageLayout(pageWidth: 300, height: 500, spread: spread, fontSize: 18,
+                                       font: .iowan, lineHeight: 1.5, margin: 24)
+        }
+
         func sync() {
+            guard model.layout?.spread == spread else { return }
             if builtVersion != model.version {
                 builtVersion = model.version
-                rebuild()
+                cache.removeAll()
+                if !model.counts.isEmpty {
+                    show(model.startIndex, animated: false, forward: true)
+                }
             }
             if let jump = model.pendingJump, jump.id != lastJump {
                 lastJump = jump.id
-                show(jump.chapter, jump.page, animated: false, forward: true)
+                if !model.counts.isEmpty {
+                    show(jump.index, animated: false, forward: true)
+                }
             }
         }
 
-        private func rebuild() {
-            cache.removeAll()
-            guard !model.counts.isEmpty else { return }
-            let chapter = min(max(0, model.startChapter), model.counts.count - 1)
-            let count = model.counts[chapter]
-            let page = min(count - 1, max(0, Int(model.startFraction * Double(count))))
-            show(chapter, page, animated: false, forward: true)
-        }
-
-        private func show(_ chapter: Int, _ page: Int, animated: Bool, forward: Bool) {
-            guard let pager, let controller = makeController(chapter, page) else { return }
+        private func show(_ index: Int, animated: Bool, forward: Bool, completion: (() -> Void)? = nil) {
+            guard let pager else { return }
+            let controllers: [PageVC]
+            if spread {
+                let left = index - index % 2
+                guard let first = controller(left), let second = controller(left + 1) else { return }
+                controllers = [first, second]
+            } else {
+                guard let single = controller(index) else { return }
+                controllers = [single]
+            }
             pager.setViewControllers(
-                [controller],
+                controllers,
                 direction: forward ? .forward : .reverse,
-                animated: animated,
-                completion: nil
-            )
-            report(controller)
+                animated: animated
+            ) { _ in
+                completion?()
+            }
+            report(controllers[0].index)
         }
 
         // MARK: Seiten
 
-        private func key(_ chapter: Int, _ page: Int) -> String {
-            "\(chapter)-\(page)"
+        private func controller(_ index: Int) -> PageVC? {
+            guard let layout = model.layout, index >= 0, index < limit else { return nil }
+            if let existing = cache[index] { return existing }
+
+            let side: PageSide = spread ? (index % 2 == 0 ? .left : .right) : .single
+            var info: PageInfo?
+            var file: URL?
+            if let location = model.locate(index), location.chapter < model.files.count {
+                info = PageInfo(
+                    chapter: location.chapter,
+                    page: location.page,
+                    number: index + 1,
+                    title: model.title(forChapter: location.chapter)
+                )
+                file = model.files[location.chapter]
+            }
+            let created = PageVC(index: index, info: info, fileURL: file, root: model.root,
+                                 layout: layout, theme: model.theme, side: side)
+            cache[index] = created
+            return created
         }
 
-        private func makeController(_ chapter: Int, _ page: Int) -> PageVC? {
-            guard let layout = model.layout,
-                  chapter >= 0, chapter < model.counts.count, chapter < model.files.count,
-                  page >= 0, page < model.counts[chapter] else { return nil }
-            let id = key(chapter, page)
-            if let existing = cache[id] { return existing }
-            let controller = PageVC(
-                chapter: chapter,
-                page: page,
-                fileURL: model.files[chapter],
-                root: model.root,
-                layout: layout,
-                theme: model.theme
-            )
-            cache[id] = controller
-            return controller
-        }
-
-        private func next(_ chapter: Int, _ page: Int) -> (Int, Int)? {
-            guard chapter < model.counts.count else { return nil }
-            if page + 1 < model.counts[chapter] { return (chapter, page + 1) }
-            if chapter + 1 < model.counts.count { return (chapter + 1, 0) }
-            return nil
-        }
-
-        private func previous(_ chapter: Int, _ page: Int) -> (Int, Int)? {
-            if page > 0 { return (chapter, page - 1) }
-            if chapter > 0, chapter - 1 < model.counts.count { return (chapter - 1, model.counts[chapter - 1] - 1) }
-            return nil
-        }
-
-        private func report(_ controller: PageVC) {
-            let chapter = controller.chapter
-            let page = controller.page
+        private func report(_ index: Int) {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                self.model.setCurrent(chapter: chapter, page: page)
-                self.prefetch(chapter, page)
+                self.model.setCurrent(index: index)
+                self.prefetch(around: index)
             }
         }
 
         /// Lädt Nachbarseiten vor, damit beim Umblättern keine leere Seite erscheint.
-        private func prefetch(_ chapter: Int, _ page: Int) {
-            var keep: Set<String> = [key(chapter, page)]
-            if let n = next(chapter, page), let c = makeController(n.0, n.1) {
-                c.loadViewIfNeeded()
-                keep.insert(key(n.0, n.1))
+        private func prefetch(around index: Int) {
+            let base = spread ? index - index % 2 : index
+            let range = spread ? (base - 2)...(base + 3) : (base - 1)...(base + 1)
+            for neighbour in range {
+                controller(neighbour)?.loadViewIfNeeded()
             }
-            if let p = previous(chapter, page), let c = makeController(p.0, p.1) {
-                c.loadViewIfNeeded()
-                keep.insert(key(p.0, p.1))
-            }
-            for stale in cache.keys where !keep.contains(stale) {
+            for stale in cache.keys where !range.contains(stale) {
                 cache.removeValue(forKey: stale)
             }
         }
@@ -148,22 +165,36 @@ struct PagerView: UIViewControllerRepresentable {
 
         func pageViewController(_ pageViewController: UIPageViewController,
                                 viewControllerAfter viewController: UIViewController) -> UIViewController? {
-            guard let current = viewController as? PageVC,
-                  let target = next(current.chapter, current.page) else { return nil }
-            return makeController(target.0, target.1)
+            guard let current = viewController as? PageVC, current.index >= 0 else { return nil }
+            return controller(current.index + 1)
         }
 
         func pageViewController(_ pageViewController: UIPageViewController,
                                 viewControllerBefore viewController: UIViewController) -> UIViewController? {
-            guard let current = viewController as? PageVC,
-                  let target = previous(current.chapter, current.page) else { return nil }
-            return makeController(target.0, target.1)
+            guard let current = viewController as? PageVC, current.index >= 0 else { return nil }
+            return controller(current.index - 1)
         }
 
         func pageViewController(_ pageViewController: UIPageViewController, didFinishAnimating finished: Bool,
                                 previousViewControllers: [UIViewController], transitionCompleted completed: Bool) {
             guard completed, let current = pageViewController.viewControllers?.first as? PageVC else { return }
-            report(current)
+            Haptics.soft()
+            PageSound.shared.play()
+            report(current.index)
+        }
+
+        func pageViewController(_ pageViewController: UIPageViewController,
+                                spineLocationFor orientation: UIInterfaceOrientation) -> UIPageViewController.SpineLocation {
+            pageViewController.isDoubleSided = spread
+            let needed = spread ? 2 : 1
+            if (pageViewController.viewControllers?.count ?? 0) != needed {
+                if model.counts.isEmpty {
+                    showPlaceholders()
+                } else {
+                    show(model.index, animated: false, forward: true)
+                }
+            }
+            return spread ? .mid : .min
         }
 
         // MARK: Tippen
@@ -171,9 +202,10 @@ struct PagerView: UIViewControllerRepresentable {
         @objc func handleTap(_ recognizer: UITapGestureRecognizer) {
             guard let view = recognizer.view else { return }
             let x = recognizer.location(in: view).x / max(1, view.bounds.width)
-            if x < 0.22 {
+            let edge = spread ? 0.16 : 0.22
+            if x < edge {
                 turn(forward: false)
-            } else if x > 0.78 {
+            } else if x > 1 - edge {
                 turn(forward: true)
             } else {
                 model.chrome.toggle()
@@ -181,19 +213,17 @@ struct PagerView: UIViewControllerRepresentable {
         }
 
         private func turn(forward: Bool) {
-            guard !animating, let pager,
-                  let current = pager.viewControllers?.first as? PageVC else { return }
-            let target = forward ? next(current.chapter, current.page) : previous(current.chapter, current.page)
-            guard let target, let controller = makeController(target.0, target.1) else { return }
+            guard !animating, !model.counts.isEmpty, let pager,
+                  let current = pager.viewControllers?.first as? PageVC, current.index >= 0 else { return }
+            let step = spread ? 2 : 1
+            let target = current.index + (forward ? step : -step)
+            guard target >= 0, target < limit else { return }
             animating = true
-            pager.setViewControllers(
-                [controller],
-                direction: forward ? .forward : .reverse,
-                animated: true
-            ) { [weak self] _ in
+            show(target, animated: true, forward: forward) { [weak self] in
                 self?.animating = false
-                self?.report(controller)
             }
+            Haptics.soft()
+            PageSound.shared.play()
         }
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,

@@ -25,6 +25,12 @@ struct Bookmark: Codable, Identifiable, Hashable {
     var date = Date()
 }
 
+struct TOCEntry: Codable, Identifiable, Hashable {
+    var id = UUID()
+    var title: String
+    var chapter: Int
+}
+
 struct Book: Codable, Identifiable, Hashable {
     var id = UUID()
     var title: String
@@ -38,22 +44,35 @@ struct Book: Codable, Identifiable, Hashable {
     var lastOpened: Date?
     var shelves: [String] = []
     var bookmarks: [Bookmark] = []
+    // Später ergänzte Felder sind optional, damit alte Bibliotheken lesbar bleiben.
+    var toc: [TOCEntry]?
+    var customCover: String?
 
     var finished: Bool { progress >= 0.98 }
+    var started: Bool { progress > 0.01 && !finished }
+}
+
+struct DayStat: Identifiable {
+    let id: String
+    let label: String
+    let seconds: Int
 }
 
 @MainActor
 final class Library: ObservableObject {
     @Published private(set) var books: [Book] = []
     @Published private(set) var shelves: [String] = []
+    @Published private(set) var stats: [String: Int] = [:]
     @Published var importError: String?
     @Published private(set) var importing = 0
 
     private let coverCache = NSCache<NSString, UIImage>()
+    private var pendingSeconds = 0
 
     private struct Store: Codable {
         var books: [Book]
         var shelves: [String]
+        var stats: [String: Int]?
     }
 
     init() {
@@ -67,10 +86,11 @@ final class Library: ObservableObject {
               let store = try? JSONDecoder().decode(Store.self, from: data) else { return }
         books = store.books
         shelves = store.shelves
+        stats = store.stats ?? [:]
     }
 
     private func save() {
-        let store = Store(books: books, shelves: shelves)
+        let store = Store(books: books, shelves: shelves, stats: stats)
         if let data = try? JSONEncoder().encode(store) {
             try? data.write(to: Paths.store, options: .atomic)
         }
@@ -94,8 +114,11 @@ final class Library: ObservableObject {
                     defer { if access { url.stopAccessingSecurityScopedResource() } }
                     return try EPUBParser.importEPUB(at: url, libraryRoot: root)
                 }.value
-                books.insert(book, at: 0)
+                withAnimation(.spring(response: 0.55, dampingFraction: 0.8)) {
+                    books.insert(book, at: 0)
+                }
                 save()
+                Haptics.success()
             } catch {
                 importError = (error as? EPUBError)?.errorDescription
                     ?? "Die Datei konnte nicht gelesen werden. Es muss eine EPUB-Datei sein."
@@ -112,8 +135,10 @@ final class Library: ObservableObject {
 
     func delete(_ id: UUID) {
         try? FileManager.default.removeItem(at: Paths.bookDir(id))
-        books.removeAll { $0.id == id }
-        coverCache.removeObject(forKey: id.uuidString as NSString)
+        withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
+            books.removeAll { $0.id == id }
+        }
+        clearCoverCache(id)
         save()
     }
 
@@ -139,15 +164,51 @@ final class Library: ObservableObject {
         }
     }
 
-    func cover(for book: Book) -> UIImage? {
-        guard let relative = book.coverPath else { return nil }
-        let key = book.id.uuidString as NSString
+    /// Liest das Inhaltsverzeichnis nach, falls das Buch vor dieser Funktion importiert wurde.
+    func ensureTOC(_ id: UUID) {
+        guard let book = book(id), book.toc == nil else { return }
+        let parsed = try? EPUBParser.parse(directory: Paths.bookDir(id))
+        mutate(id) { $0.toc = parsed?.toc ?? [] }
+    }
+
+    // MARK: Cover
+
+    private func clearCoverCache(_ id: UUID) {
+        coverCache.removeObject(forKey: "\(id.uuidString)-s" as NSString)
+        coverCache.removeObject(forKey: "\(id.uuidString)-l" as NSString)
+    }
+
+    func cover(for book: Book, large: Bool = false) -> UIImage? {
+        guard let relative = book.customCover ?? book.coverPath else { return nil }
+        let key = "\(book.id.uuidString)-\(large ? "l" : "s")" as NSString
         if let cached = coverCache.object(forKey: key) { return cached }
         let url = Paths.bookDir(book.id).appendingPathComponent(relative)
         guard let image = UIImage(contentsOfFile: url.path) else { return nil }
-        let thumb = image.preparingThumbnail(of: CGSize(width: 480, height: 720)) ?? image
+        let size = large ? CGSize(width: 1000, height: 1500) : CGSize(width: 420, height: 630)
+        let thumb = image.preparingThumbnail(of: size) ?? image
         coverCache.setObject(thumb, forKey: key)
         return thumb
+    }
+
+    func setCustomCover(_ id: UUID, data: Data) {
+        guard let image = UIImage(data: data), let jpeg = image.jpegData(compressionQuality: 0.88) else { return }
+        let name = "eigenes-cover-\(Int(Date().timeIntervalSince1970)).jpg"
+        let url = Paths.bookDir(id).appendingPathComponent(name)
+        do {
+            try jpeg.write(to: url, options: .atomic)
+        } catch {
+            return
+        }
+        clearCoverCache(id)
+        mutate(id) { $0.customCover = name }
+    }
+
+    func resetCustomCover(_ id: UUID) {
+        if let name = book(id)?.customCover {
+            try? FileManager.default.removeItem(at: Paths.bookDir(id).appendingPathComponent(name))
+        }
+        clearCoverCache(id)
+        mutate(id) { $0.customCover = nil }
     }
 
     // MARK: Lesezeichen
@@ -184,6 +245,75 @@ final class Library: ObservableObject {
             } else {
                 $0.shelves.append(shelf)
             }
+        }
+    }
+
+    // MARK: Lesestatistik
+
+    private static let dayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }()
+
+    private static let weekdayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "de_DE")
+        formatter.dateFormat = "EEEEEE"
+        return formatter
+    }()
+
+    private func key(_ date: Date) -> String {
+        Library.dayFormatter.string(from: date)
+    }
+
+    func addReading(seconds: Int) {
+        stats[key(Date()), default: 0] += seconds
+        pendingSeconds += seconds
+        if pendingSeconds >= 30 {
+            flushStats()
+        }
+    }
+
+    func flushStats() {
+        guard pendingSeconds > 0 else { return }
+        pendingSeconds = 0
+        save()
+    }
+
+    var todaySeconds: Int {
+        stats[key(Date())] ?? 0
+    }
+
+    var totalSeconds: Int {
+        stats.values.reduce(0, +)
+    }
+
+    /// Aufeinanderfolgende Tage mit mindestens einer Minute Lesezeit.
+    var streak: Int {
+        let calendar = Calendar.current
+        var day = Date()
+        if (stats[key(day)] ?? 0) < 60 {
+            guard let yesterday = calendar.date(byAdding: .day, value: -1, to: day) else { return 0 }
+            day = yesterday
+        }
+        var count = 0
+        while (stats[key(day)] ?? 0) >= 60 {
+            count += 1
+            guard let previous = calendar.date(byAdding: .day, value: -1, to: day) else { break }
+            day = previous
+        }
+        return count
+    }
+
+    var lastSevenDays: [DayStat] {
+        let calendar = Calendar.current
+        return (0..<7).reversed().compactMap { offset in
+            guard let day = calendar.date(byAdding: .day, value: -offset, to: Date()) else { return nil }
+            let id = key(day)
+            return DayStat(id: id, label: Library.weekdayFormatter.string(from: day), seconds: stats[id] ?? 0)
         }
     }
 }

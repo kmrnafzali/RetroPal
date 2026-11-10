@@ -77,12 +77,78 @@ enum EPUBParser {
             coverPath = nil
         }
 
-        return Book(
+        var book = Book(
             title: opf.title ?? "",
             author: opf.creator ?? "",
             spine: spine,
             coverPath: coverPath
         )
+        book.toc = tableOfContents(opf: opf, spine: spine, directory: directory, resolve: resolve)
+        return book
+    }
+
+    // MARK: Inhaltsverzeichnis
+
+    private static func tableOfContents(opf: OPFParser, spine: [String], directory: URL,
+                                        resolve: (String) -> String) -> [TOCEntry] {
+        var index: [String: Int] = [:]
+        for (position, path) in spine.enumerated() where index[path] == nil {
+            index[path] = position
+        }
+
+        var raw: [(String, String)] = []
+        var tocPath = ""
+
+        if let ncx = opf.manifest.values.first(where: { $0.type.lowercased() == "application/x-dtbncx+xml" }) {
+            tocPath = resolve(ncx.href)
+            if let data = try? Data(contentsOf: directory.appendingPathComponent(tocPath)) {
+                let parser = NCXParser()
+                parser.run(data)
+                raw = parser.entries
+            }
+        }
+        if raw.isEmpty, let nav = opf.manifest.values.first(where: { $0.props.contains("nav") }) {
+            tocPath = resolve(nav.href)
+            if let data = try? Data(contentsOf: directory.appendingPathComponent(tocPath)),
+               let html = String(data: data, encoding: .utf8) {
+                raw = navLinks(in: html)
+            }
+        }
+
+        let tocDirectory = (tocPath as NSString).deletingLastPathComponent
+        var result: [TOCEntry] = []
+        var seen = Set<Int>()
+        for (title, src) in raw {
+            let decoded = src.removingPercentEncoding ?? src
+            let file = decoded.components(separatedBy: "#")[0]
+            guard !file.isEmpty else { continue }
+            let path = normalize(tocDirectory.isEmpty ? file : tocDirectory + "/" + file)
+            guard let chapter = index[path], !seen.contains(chapter) else { continue }
+            let clean = title.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !clean.isEmpty else { continue }
+            seen.insert(chapter)
+            result.append(TOCEntry(title: clean, chapter: chapter))
+        }
+        return result.sorted { $0.chapter < $1.chapter }
+    }
+
+    private static func navLinks(in html: String) -> [(String, String)] {
+        guard let regex = try? NSRegularExpression(
+            pattern: "<a[^>]*href=\"([^\"]+)\"[^>]*>(.*?)</a>",
+            options: [.caseInsensitive, .dotMatchesLineSeparators]
+        ) else { return [] }
+        let text = html as NSString
+        var result: [(String, String)] = []
+        for match in regex.matches(in: html, range: NSRange(location: 0, length: text.length)) {
+            let href = text.substring(with: match.range(at: 1))
+            let label = text.substring(with: match.range(at: 2))
+                .replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+                .replacingOccurrences(of: "&amp;", with: "&")
+                .replacingOccurrences(of: "&nbsp;", with: " ")
+            result.append((label, href))
+        }
+        return result
     }
 
     static func normalize(_ path: String) -> String {
@@ -183,5 +249,48 @@ final class OPFParser: NSObject, XMLParserDelegate {
         }
         currentName = ""
         buffer = ""
+    }
+}
+
+final class NCXParser: NSObject, XMLParserDelegate {
+    var entries: [(String, String)] = []
+    private var inLabel = false
+    private var inText = false
+    private var label = ""
+
+    func run(_ data: Data) {
+        let parser = XMLParser(data: data)
+        parser.delegate = self
+        parser.parse()
+    }
+
+    func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?,
+                qualifiedName qName: String?, attributes attributeDict: [String: String] = [:]) {
+        switch localName(elementName) {
+        case "navLabel":
+            inLabel = true
+            label = ""
+        case "text":
+            inText = inLabel
+        case "content":
+            if let src = attributeDict["src"] {
+                entries.append((label, src))
+            }
+        default:
+            break
+        }
+    }
+
+    func parser(_ parser: XMLParser, foundCharacters string: String) {
+        if inText { label += string }
+    }
+
+    func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?,
+                qualifiedName qName: String?) {
+        switch localName(elementName) {
+        case "navLabel": inLabel = false
+        case "text": inText = false
+        default: break
+        }
     }
 }
