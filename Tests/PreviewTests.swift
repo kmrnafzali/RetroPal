@@ -30,7 +30,46 @@ final class PreviewTests: XCTestCase {
         return seed >> 33
     }
 
-    private func makeBook(title: String, author: String, chapters: Int, progress: Double) throws -> Book {
+    /// Malt ein einfaches Coverbild, damit auch Bücher mit echtem Cover geprüft werden.
+    private func coverImage(title: String) -> UIImage {
+        let size = CGSize(width: 800, height: 1200)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        return UIGraphicsImageRenderer(size: size, format: format).image { context in
+            let colors = [UIColor(red: 0.10, green: 0.22, blue: 0.36, alpha: 1).cgColor,
+                          UIColor(red: 0.78, green: 0.42, blue: 0.22, alpha: 1).cgColor] as CFArray
+            if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0, 1]) {
+                context.cgContext.drawLinearGradient(gradient, start: .zero, end: CGPoint(x: 0, y: size.height), options: [])
+            }
+            UIColor.white.withAlphaComponent(0.85).setStroke()
+            let frame = UIBezierPath(rect: CGRect(x: 30, y: 30, width: size.width - 60, height: size.height - 60))
+            frame.lineWidth = 6
+            frame.stroke()
+            let style = NSMutableParagraphStyle()
+            style.alignment = .center
+            (title as NSString).draw(in: CGRect(x: 70, y: 180, width: size.width - 140, height: 500), withAttributes: [
+                .font: UIFont(name: "Georgia-Bold", size: 96) ?? UIFont.boldSystemFont(ofSize: 96),
+                .foregroundColor: UIColor.white,
+                .paragraphStyle: style
+            ])
+            ("ANNA BEISPIEL" as NSString).draw(in: CGRect(x: 70, y: 1030, width: size.width - 140, height: 80), withAttributes: [
+                .font: UIFont.systemFont(ofSize: 44, weight: .medium),
+                .foregroundColor: UIColor.white.withAlphaComponent(0.9),
+                .paragraphStyle: style
+            ])
+        }
+    }
+
+    private func note(_ line: String) {
+        print("LESEN-MESSUNG: \(line)")
+        try? FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        let url = output.appendingPathComponent("messung.txt")
+        let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        try? (existing + line + "\n").write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    private func makeBook(title: String, author: String, chapters: Int, progress: Double,
+                          withCover: Bool = false) throws -> Book {
         let id = UUID()
         let directory = Paths.bookDir(id).appendingPathComponent("OEBPS", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -68,6 +107,10 @@ final class PreviewTests: XCTestCase {
             toc.append(TOCEntry(title: "Kapitel \(chapter + 1)", chapter: chapter))
         }
         var book = Book(title: title, author: author, spine: spine, coverPath: nil)
+        if withCover, let data = coverImage(title: title).jpegData(compressionQuality: 0.9) {
+            try data.write(to: Paths.bookDir(id).appendingPathComponent("cover.jpg"))
+            book.coverPath = "cover.jpg"
+        }
         book.id = id
         book.toc = toc
         book.progress = progress
@@ -87,15 +130,25 @@ final class PreviewTests: XCTestCase {
         RunLoop.main.run(until: Date().addingTimeInterval(seconds))
     }
 
-    private func snapshot<V: View>(_ view: V, size: CGSize, name: String, delay: TimeInterval) {
-        let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+    private var scene: UIWindowScene? {
+        UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+    }
+
+    /// Zeigt eine Ansicht in einem eigenen Fenster. Ohne Größe füllt es den echten Simulator-Bildschirm
+    /// mit seinen echten Rändern.
+    private func present<V: View>(_ view: V, size: CGSize?) -> UIWindow {
+        ReaderModel.current = nil
         let window = scene.map { UIWindow(windowScene: $0) } ?? UIWindow(frame: .zero)
-        window.frame = CGRect(origin: .zero, size: size)
-        let host = UIHostingController(rootView: view)
-        window.rootViewController = host
+        if let size {
+            window.frame = CGRect(origin: .zero, size: size)
+        }
+        window.rootViewController = UIHostingController(rootView: view)
         window.isHidden = false
         window.layoutIfNeeded()
-        wait(delay)
+        return window
+    }
+
+    private func capture(_ window: UIWindow, name: String) {
         let renderer = UIGraphicsImageRenderer(bounds: window.bounds)
         let image = renderer.image { context in
             if !window.drawHierarchy(in: window.bounds, afterScreenUpdates: true) {
@@ -103,8 +156,39 @@ final class PreviewTests: XCTestCase {
             }
         }
         save(image, name)
+    }
+
+    private func dismiss(_ window: UIWindow) {
         window.isHidden = true
         window.rootViewController = nil
+    }
+
+    private func snapshot<V: View>(_ view: V, size: CGSize?, name: String, delay: TimeInterval) {
+        let window = present(view, size: size)
+        wait(delay)
+        capture(window, name: name)
+        dismiss(window)
+    }
+
+    private func rotate(_ orientations: UIInterfaceOrientationMask) {
+        guard let scene else { return }
+        scene.requestGeometryUpdate(.iOS(interfaceOrientations: orientations)) { [weak self] error in
+            DispatchQueue.main.async {
+                self?.note("Drehen nicht möglich: \(error.localizedDescription)")
+            }
+        }
+        wait(2.5)
+    }
+
+    private func waitUntilReady(_ timeout: TimeInterval = 30) -> ReaderModel? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let model = ReaderModel.current, !model.isPaginating, !model.counts.isEmpty {
+                return model
+            }
+            wait(0.1)
+        }
+        return ReaderModel.current
     }
 
     // MARK: Tests
@@ -135,24 +219,18 @@ final class PreviewTests: XCTestCase {
             XCTAssertFalse(text.contains("<"), "Es dürfen keine Tags im Text stehen")
         }
 
-        // Seite direkt zeichnen
+        // Seiten als fertige Bilder zeichnen
         let chapter = try XCTUnwrap(engine.chapter(0))
         for page in 0..<2 {
-            let canvas = PageCanvas(frame: CGRect(origin: .zero, size: layout.size))
-            canvas.chapterLayout = chapter
-            canvas.page = page
-            canvas.theme = .paper
-            canvas.margin = CGFloat(layout.margin)
-            canvas.textOrigin = CGPoint(x: CGFloat(layout.margin), y: CGFloat(layout.topPad))
-            canvas.footerTitle = "KAPITEL 1"
-            canvas.footerNumber = "\(page + 1)"
-            canvas.dogEar = page == 1
+            var decor = PageDecor()
+            decor.dogEar = page == 1
             if page == 1, let sentence = chapter.sentenceRange(at: chapter.pageRanges[1].location + 200) {
-                canvas.highlights = [sentence]
+                decor.highlights = [sentence]
             }
-            let image = UIGraphicsImageRenderer(bounds: canvas.bounds).image { context in
-                canvas.layer.render(in: context.cgContext)
-            }
+            let spec = PageSpec(index: page, chapter: 0, page: page, number: page + 1, title: "KAPITEL 1", side: .single)
+            let image = PageRenderer.render(PageJob(spec: spec, decor: decor, layout: layout, theme: .paper,
+                                                    engine: engine, scale: 2))
+            XCTAssertEqual(image.size, layout.size)
             save(image, "motor-seite-\(page + 1)")
         }
 
@@ -178,6 +256,131 @@ final class PreviewTests: XCTestCase {
         for (chapter, starts) in a.starts.enumerated() {
             XCTAssertEqual(starts, engine.chapter(chapter)?.starts, "Gespeicherte und frisch gesetzte Seiten müssen übereinstimmen")
         }
+    }
+
+    /// Text darf nie unter Rändern, Seitenleiste, Kamera oder Falz liegen – auf keinem Display.
+    func testGeometryKeepsTextClear() {
+        struct Case {
+            var name: String
+            var full: CGSize
+            var insets: UIEdgeInsets
+            var fold: FoldInfo?
+            var holes: [CGRect] = []
+            var spread: Bool
+        }
+        let centreFold = FoldInfo(frame: CGRect(x: 420, y: 0, width: 40, height: 960), isActive: false)
+        let cases = [
+            Case(name: "innen flach", full: CGSize(width: 880, height: 960),
+                 insets: UIEdgeInsets(top: 24, left: 0, bottom: 20, right: 0), fold: centreFold, spread: true),
+            Case(name: "innen mit Seitenleiste", full: CGSize(width: 880, height: 960),
+                 insets: UIEdgeInsets(top: 24, left: 0, bottom: 20, right: 84), fold: centreFold, spread: true),
+            Case(name: "innen, Falz außermittig", full: CGSize(width: 964, height: 960),
+                 insets: UIEdgeInsets(top: 24, left: 0, bottom: 20, right: 84), fold: centreFold, spread: true),
+            Case(name: "innen mit Kamera", full: CGSize(width: 880, height: 960),
+                 insets: UIEdgeInsets(top: 24, left: 0, bottom: 20, right: 0), fold: centreFold,
+                 holes: [CGRect(x: 20, y: 10, width: 50, height: 50)], spread: true),
+            Case(name: "innen halb aufgeklappt (Buch)", full: CGSize(width: 880, height: 960),
+                 insets: UIEdgeInsets(top: 24, left: 0, bottom: 20, right: 0),
+                 fold: FoldInfo(frame: centreFold.frame, isActive: true), spread: true),
+            Case(name: "innen quer", full: CGSize(width: 960, height: 880),
+                 insets: UIEdgeInsets(top: 24, left: 0, bottom: 20, right: 0), fold: nil, spread: true),
+            Case(name: "Tisch-Modus", full: CGSize(width: 960, height: 880),
+                 insets: UIEdgeInsets(top: 24, left: 0, bottom: 20, right: 0),
+                 fold: FoldInfo(frame: CGRect(x: 0, y: 420, width: 960, height: 40), isActive: true), spread: true),
+            Case(name: "außen", full: CGSize(width: 440, height: 956),
+                 insets: UIEdgeInsets(top: 59, left: 0, bottom: 34, right: 0), fold: nil, spread: false),
+            Case(name: "außen mit Seitenleiste", full: CGSize(width: 440, height: 956),
+                 insets: UIEdgeInsets(top: 59, left: 0, bottom: 34, right: 84), fold: nil, spread: false)
+        ]
+        for item in cases {
+            for margin in [16, 26, 40] {
+                let metrics = ReaderMetrics.make(full: item.full, insets: item.insets, fold: item.fold,
+                                                 occlusions: item.holes, margin: margin)
+                let layout = metrics.layout(fontSize: 19, font: .iowan, lineHeight: 1.55, margin: margin)
+                let label = "\(item.name), Rand \(margin)"
+                XCTAssertEqual(metrics.spread, item.spread, label)
+                var safe = CGRect(origin: .zero, size: item.full).inset(by: item.insets)
+                if let panel = metrics.panel {
+                    safe.size.height = min(safe.maxY, panel.minY - 40) - safe.minY
+                }
+                let screen = CGRect(origin: .zero, size: item.full)
+                XCTAssertTrue(screen.insetBy(dx: -0.5, dy: -0.5).contains(metrics.pagerFrame), "Buch im Bildschirm: \(label)")
+                let rects = metrics.textRects(layout)
+                XCTAssertEqual(rects.count, item.spread ? 2 : 1, label)
+                for rect in rects {
+                    XCTAssertTrue(safe.insetBy(dx: -0.5, dy: -0.5).contains(rect), "Text in der sicheren Fläche: \(label) \(rect) / \(safe)")
+                    XCTAssertEqual(rect.size, layout.contentSize, label)
+                    XCTAssertGreaterThan(rect.width, 200, label)
+                    if let fold = item.fold {
+                        XCTAssertFalse(rect.intersects(fold.frame), "Text im Falz: \(label)")
+                    }
+                    for hole in item.holes {
+                        XCTAssertFalse(rect.intersects(hole), "Text unter der Kamera: \(label)")
+                    }
+                }
+                if item.spread, rects.count == 2 {
+                    let centre = (item.fold?.frame.height ?? 0) >= (item.fold?.frame.width ?? 1)
+                        ? (item.fold?.frame.midX ?? item.full.width / 2) : item.full.width / 2
+                    XCTAssertEqual(metrics.pagerFrame.midX, centre, accuracy: 0.6, "Buchrücken auf dem Falz: \(label)")
+                    XCTAssertLessThan(rects[0].maxX, centre, label)
+                    XCTAssertGreaterThan(rects[1].minX, centre, label)
+                    XCTAssertEqual(rects[0].width, rects[1].width, label)
+                }
+                XCTAssertEqual(metrics.pagerFrame.width, CGFloat(metrics.pageWidth * (item.spread ? 2 : 1)), label)
+            }
+        }
+    }
+
+    /// Blättert durch ein Buch und prüft, dass dabei keine Seite erst im Moment des Blätterns
+    /// gezeichnet und kein Kapitel erst dann gesetzt wird.
+    func testTurningShowsOnlyFinishedPages() throws {
+        let library = Library()
+        let book = try makeBook(title: "Der Hafen im Nebel", author: "Anna Beispiel", chapters: 12, progress: 0)
+        library.addForTesting(book)
+        ReaderDiagnostics.shared.reset()
+
+        let window = present(ReaderView(book: book, onClose: {}).environmentObject(library), size: nil)
+        let model = try XCTUnwrap(waitUntilReady())
+        XCTAssertFalse(model.isPaginating, "Das Buch muss innerhalb der Wartezeit bereit sein")
+        wait(1.5)
+        note("Fenster \(Int(window.bounds.width))×\(Int(window.bounds.height)), Ränder \(window.safeAreaInsets), Seiten \(model.totalPages), Doppelseite \(model.spread)")
+        XCTAssertEqual(ReaderDiagnostics.shared.syncRenderCount, 0, "Schon beim Öffnen liegen die Seiten fertig bereit")
+
+        var forward = 0
+        for _ in 0..<16 {
+            let before = model.index
+            model.turnHandler?(true)
+            wait(0.8)
+            if model.index > before { forward += 1 }
+        }
+        var backward = 0
+        for _ in 0..<5 {
+            let before = model.index
+            model.turnHandler?(false)
+            wait(0.8)
+            if model.index < before { backward += 1 }
+        }
+        // Schnell hintereinander, ohne auf das Vorzeichnen zu warten
+        var quick = 0
+        for _ in 0..<8 {
+            let before = model.index
+            model.turnHandler?(true)
+            wait(0.5)
+            if model.index > before { quick += 1 }
+        }
+        note("Geblättert: \(forward) vor, \(backward) zurück, \(quick) schnell; jetzt Seite \(model.index + 1), Kapitel \(model.chapter + 1)")
+        for line in ReaderDiagnostics.shared.summary(maximumRate: UIScreen.main.maximumFramesPerSecond) {
+            note(line)
+        }
+        capture(window, name: "9-nach-dem-blaettern")
+        dismiss(window)
+
+        XCTAssertGreaterThanOrEqual(forward, 14, "Vorwärtsblättern muss funktionieren")
+        XCTAssertGreaterThanOrEqual(backward, 4, "Zurückblättern muss funktionieren")
+        XCTAssertGreaterThan(model.chapter, 1, "Es wurde über Kapitelgrenzen geblättert")
+        XCTAssertEqual(ReaderDiagnostics.shared.syncRenderCount, 0, "Keine Seite darf erst beim Blättern gezeichnet werden")
+        XCTAssertEqual(ReaderDiagnostics.shared.mainBuildCount, 0, "Kein Kapitel darf erst beim Blättern gesetzt werden")
+        XCTAssertFalse(ReaderDiagnostics.shared.hasMismatch, "Seitenfläche und berechnete Seite müssen übereinstimmen")
     }
 
     func testScreens() throws {
@@ -211,5 +414,42 @@ final class PreviewTests: XCTestCase {
         snapshot(BookDetailView(bookID: books[0].id, onRead: {}, onChooseCover: {}).environmentObject(library),
                  size: outer, name: "5-buch-detail", delay: 1.5)
         snapshot(StatsView().environmentObject(library), size: outer, name: "6-statistik", delay: 2)
+
+        // Außendisplay-Cover: füllend, ganzes Cover und Ersatzcover
+        let withCover = try makeBook(title: "Der Hafen im Nebel", author: "Anna Beispiel", chapters: 1,
+                                     progress: 0, withCover: true)
+        library.addForTesting(withCover)
+        let picture = library.cover(for: withCover, large: true)
+        XCTAssertNotNil(picture)
+        let info = CoverDisplayInfo(image: picture, title: withCover.title, author: withCover.author, progress: 0.42)
+        UserDefaults.standard.set(true, forKey: "coverFill")
+        snapshot(CoverDisplayView(info: info), size: outer, name: "10-cover-aussen-fuellend", delay: 1)
+        UserDefaults.standard.set(false, forKey: "coverFill")
+        snapshot(CoverDisplayView(info: info), size: outer, name: "11-cover-aussen-ganz", delay: 1)
+        UserDefaults.standard.set(true, forKey: "coverFill")
+        snapshot(CoverDisplayView(info: CoverDisplayInfo(image: nil, title: "Zwei Laternen", author: "Bernd Muster",
+                                                         progress: 0.1)),
+                 size: outer, name: "12-cover-aussen-ersatz", delay: 1)
+
+        // Echter Simulator-Bildschirm mit seinen echten Rändern, hoch und quer
+        if let scene {
+            note("Simulator-Bildschirm: \(scene.screen.bounds.size), Szene: \(scene.coordinateSpace.bounds.size)")
+        }
+        for (mask, name) in [(UIInterfaceOrientationMask.portrait, "hoch"), (.landscapeRight, "quer")] {
+            rotate(mask)
+            ReaderDiagnostics.shared.reset()
+            let window = present(ReaderView(book: books[0], onClose: {}).environmentObject(library), size: nil)
+            let model = waitUntilReady()
+            wait(2)
+            model?.chrome = false
+            wait(0.8)
+            capture(window, name: "7-lesen-echt-\(name)")
+            note("Echt \(name): Fenster \(Int(window.bounds.width))×\(Int(window.bounds.height)), Ränder \(window.safeAreaInsets)")
+            for line in ReaderDiagnostics.shared.summary(maximumRate: UIScreen.main.maximumFramesPerSecond).suffix(6) {
+                note("Echt \(name): \(line)")
+            }
+            dismiss(window)
+        }
+        rotate(.portrait)
     }
 }

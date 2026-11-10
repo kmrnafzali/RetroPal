@@ -23,6 +23,7 @@ struct PagerView: UIViewControllerRepresentable {
         pager.delegate = context.coordinator
         pager.view.backgroundColor = model.theme.background
         context.coordinator.pager = pager
+        context.coordinator.attach()
         context.coordinator.showPlaceholders()
         let coordinator = context.coordinator
         model.turnHandler = { [weak coordinator] forward in
@@ -40,6 +41,11 @@ struct PagerView: UIViewControllerRepresentable {
 
     func updateUIViewController(_ pager: UIPageViewController, context: Context) {
         pager.view.backgroundColor = model.theme.background
+        let scale = pager.traitCollection.displayScale
+        if scale > 0, abs(scale - model.displayScale) > 0.01 {
+            let model = self.model
+            DispatchQueue.main.async { model.setScale(scale) }
+        }
         context.coordinator.sync()
     }
 
@@ -55,26 +61,34 @@ struct PagerView: UIViewControllerRepresentable {
         private var lastJump: UUID?
         private var cache: [Int: PageVC] = [:]
         private var animating = false
+        private var token = 0
+        private var current = 0
+        private let frames = FrameMonitor()
 
         init(model: ReaderModel, spread: Bool) {
             self.model = model
             self.spread = spread
         }
 
-        /// Anzahl der Seiten inklusive einer leeren Schlussseite, damit die Doppelseite aufgeht.
-        private var limit: Int {
-            let total = model.totalPages
-            return spread ? total + total % 2 : total
+        private var step: Int { spread ? 2 : 1 }
+
+        /// Fertige Seitenbilder landen sofort in den wartenden Seiten.
+        func attach() {
+            model.pages.onReady = { [weak self] index in
+                guard let self, self.builtVersion == self.model.version, !self.model.isPaginating else { return }
+                self.cache[index]?.refresh(allowSync: false, counted: false)
+                if abs(index - self.current) <= self.step + 1 {
+                    self.controller(index)?.loadViewIfNeeded()
+                }
+            }
         }
 
         // MARK: Zustand abgleichen
 
         func showPlaceholders() {
             guard let pager else { return }
-            let layout = model.layout ?? PageLayout(pageWidth: 300, height: 500, spread: spread, fontSize: 18,
-                                                    font: .iowan, lineHeight: 1.5, margin: 24)
             func blank(_ index: Int, _ side: PageSide) -> PageVC {
-                PageVC(index: index, info: nil, model: model, layout: layout, theme: model.theme, side: side)
+                PageVC(index: index, spec: nil, model: model, theme: model.theme, side: side)
             }
             let controllers = spread ? [blank(-2, .left), blank(-1, .right)] : [blank(-1, .single)]
             pager.setViewControllers(controllers, direction: .forward, animated: false, completion: nil)
@@ -86,62 +100,78 @@ struct PagerView: UIViewControllerRepresentable {
                 builtVersion = model.version
                 cache.removeAll()
                 if !model.counts.isEmpty {
-                    show(model.startIndex, animated: false, forward: true)
+                    present(model.startIndex, animated: false, forward: true)
                 }
             }
             if let jump = model.pendingJump, jump.id != lastJump {
                 lastJump = jump.id
                 if !model.counts.isEmpty {
-                    show(jump.index, animated: false, forward: true)
+                    present(jump.index, animated: false, forward: true)
                 }
             }
             if decorVersion != model.decorVersion {
                 decorVersion = model.decorVersion
+                guard !model.counts.isEmpty, !model.isPaginating else { return }
                 for controller in cache.values {
-                    controller.reloadDecor()
+                    // Sichtbare Seiten sofort neu zeichnen, alle anderen im Hintergrund.
+                    controller.refresh(allowSync: controller.viewIfLoaded?.window != nil, counted: false)
                 }
+                model.requestPages(Array(model.window(around: current)))
             }
         }
 
-        private func show(_ index: Int, animated: Bool, forward: Bool, completion: (() -> Void)? = nil) {
-            guard let pager else { return }
-            let controllers: [PageVC]
-            if spread {
-                let left = index - index % 2
-                guard let first = controller(left), let second = controller(left + 1) else { return }
-                controllers = [first, second]
-            } else {
-                guard let single = controller(index) else { return }
-                controllers = [single]
+        /// Zeigt eine Seite (oder Doppelseite). Liegen die Bilder noch nicht bereit, werden sie
+        /// erst im Hintergrund gezeichnet – der Hauptthread bleibt dabei frei.
+        private func present(_ index: Int, animated: Bool, forward: Bool, completion: (() -> Void)? = nil) {
+            let first = spread ? index - index % 2 : index
+            let indices = spread ? [first, first + 1] : [first]
+            token += 1
+            let expected = token
+            if model.pagesReady(indices) {
+                commit(indices, animated: animated, forward: forward, completion: completion)
+                return
             }
-            pager.setViewControllers(
-                controllers,
-                direction: forward ? .forward : .reverse,
-                animated: animated
-            ) { _ in
+            model.preparePages(indices) { [weak self] in
+                guard let self, self.token == expected, self.model.pagesReady(indices) else {
+                    completion?()
+                    return
+                }
+                self.commit(indices, animated: animated, forward: forward, completion: completion)
+            }
+        }
+
+        private func commit(_ indices: [Int], animated: Bool, forward: Bool, completion: (() -> Void)?) {
+            guard let pager else {
                 completion?()
+                return
             }
-            report(controllers[0].index)
+            let controllers = indices.compactMap { controller($0) }
+            guard controllers.count == indices.count, let first = controllers.first else {
+                completion?()
+                return
+            }
+            current = first.index
+            if animated {
+                frames.begin()
+                pager.setViewControllers(controllers, direction: forward ? .forward : .reverse, animated: true) { [weak self] _ in
+                    self?.frames.end()
+                    completion?()
+                    // Erst nach der Animation melden, damit währenddessen nichts anderes rechnet.
+                    self?.report(first.index)
+                }
+            } else {
+                pager.setViewControllers(controllers, direction: forward ? .forward : .reverse, animated: false, completion: nil)
+                completion?()
+                report(first.index)
+            }
         }
 
         // MARK: Seiten
 
         private func controller(_ index: Int) -> PageVC? {
-            guard let layout = model.layout, index >= 0, index < limit else { return nil }
             if let existing = cache[index] { return existing }
-
-            let side: PageSide = spread ? (index % 2 == 0 ? .left : .right) : .single
-            var info: PageInfo?
-            if let location = model.locate(index), location.chapter < model.files.count {
-                info = PageInfo(
-                    chapter: location.chapter,
-                    page: location.page,
-                    number: index + 1,
-                    title: model.title(forChapter: location.chapter)
-                )
-            }
-            let created = PageVC(index: index, info: info, model: model, layout: layout,
-                                 theme: model.theme, side: side)
+            guard let spec = model.spec(index) else { return nil }
+            let created = PageVC(index: index, spec: spec, model: model, theme: model.theme, side: spec.side)
             cache[index] = created
             return created
         }
@@ -149,20 +179,23 @@ struct PagerView: UIViewControllerRepresentable {
         private func report(_ index: Int) {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
+                self.current = index
                 self.model.setCurrent(index: index)
                 self.prefetch(around: index)
             }
         }
 
-        /// Hält die Nachbarseiten bereit und räumt weiter entfernte ab.
+        /// Zeichnet die Nachbarseiten im Hintergrund vor und räumt weiter entfernte ab.
         private func prefetch(around index: Int) {
-            let base = spread ? index - index % 2 : index
-            let range = spread ? (base - 4)...(base + 5) : (base - 2)...(base + 2)
-            for neighbour in range {
-                controller(neighbour)?.loadViewIfNeeded()
-            }
+            let range = model.window(around: index)
+            model.requestPages(Array(range))
+            model.pages.trim(keeping: (range.lowerBound - step)...(range.upperBound + step))
             for stale in cache.keys where !range.contains(stale) {
                 cache.removeValue(forKey: stale)
+            }
+            let base = spread ? index - index % 2 : index
+            for neighbour in (base - step)...(base + 2 * step - 1) where model.pagesReady([neighbour]) {
+                controller(neighbour)?.loadViewIfNeeded()
             }
         }
 
@@ -170,22 +203,28 @@ struct PagerView: UIViewControllerRepresentable {
 
         func pageViewController(_ pageViewController: UIPageViewController,
                                 viewControllerAfter viewController: UIViewController) -> UIViewController? {
-            guard let current = viewController as? PageVC, current.index >= 0 else { return nil }
-            return controller(current.index + 1)
+            guard let page = viewController as? PageVC, page.index >= 0 else { return nil }
+            return controller(page.index + 1)
         }
 
         func pageViewController(_ pageViewController: UIPageViewController,
                                 viewControllerBefore viewController: UIViewController) -> UIViewController? {
-            guard let current = viewController as? PageVC, current.index >= 0 else { return nil }
-            return controller(current.index - 1)
+            guard let page = viewController as? PageVC, page.index >= 0 else { return nil }
+            return controller(page.index - 1)
+        }
+
+        func pageViewController(_ pageViewController: UIPageViewController,
+                                willTransitionTo pendingViewControllers: [UIViewController]) {
+            frames.begin()
         }
 
         func pageViewController(_ pageViewController: UIPageViewController, didFinishAnimating finished: Bool,
                                 previousViewControllers: [UIViewController], transitionCompleted completed: Bool) {
-            guard completed, let current = pageViewController.viewControllers?.first as? PageVC else { return }
+            frames.end()
+            guard completed, let page = pageViewController.viewControllers?.first as? PageVC else { return }
             Haptics.soft()
             PageSound.shared.play()
-            report(current.index)
+            report(page.index)
         }
 
         func pageViewController(_ pageViewController: UIPageViewController,
@@ -196,7 +235,7 @@ struct PagerView: UIViewControllerRepresentable {
                 if model.counts.isEmpty {
                     showPlaceholders()
                 } else {
-                    show(model.index, animated: false, forward: true)
+                    present(model.index, animated: false, forward: true)
                 }
             }
             return spread ? .mid : .min
@@ -238,16 +277,15 @@ struct PagerView: UIViewControllerRepresentable {
 
         func turn(forward: Bool) {
             guard !animating, !model.counts.isEmpty, let pager,
-                  let current = pager.viewControllers?.first as? PageVC, current.index >= 0 else { return }
-            let step = spread ? 2 : 1
-            let target = current.index + (forward ? step : -step)
-            guard target >= 0, target < limit else { return }
+                  let page = pager.viewControllers?.first as? PageVC, page.index >= 0 else { return }
+            let target = page.index + (forward ? step : -step)
+            guard target >= 0, target < model.pageLimit else { return }
             animating = true
-            show(target, animated: true, forward: forward) { [weak self] in
-                self?.animating = false
-            }
             Haptics.soft()
             PageSound.shared.play()
+            present(target, animated: true, forward: forward) { [weak self] in
+                self?.animating = false
+            }
         }
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,

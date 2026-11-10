@@ -583,6 +583,8 @@ final class ChapterBuilder: NSObject, XMLParserDelegate {
 final class ChapterLayout {
     let storage: NSTextStorage
     let manager = NSLayoutManager()
+    /// Gezeichnet wird im Hintergrund, angetippt auf dem Hauptthread: Zugriffe aufs Layout laufen nacheinander.
+    let lock = NSRecursiveLock()
     private(set) var containers: [NSTextContainer] = []
     private(set) var pageRanges: [NSRange] = []
 
@@ -625,6 +627,8 @@ final class ChapterLayout {
 
     func draw(page: Int, at origin: CGPoint) {
         guard page >= 0, page < containers.count else { return }
+        lock.lock()
+        defer { lock.unlock() }
         let glyphs = manager.glyphRange(for: containers[page])
         manager.drawBackground(forGlyphRange: glyphs, at: origin)
         manager.drawGlyphs(forGlyphRange: glyphs, at: origin)
@@ -635,6 +639,8 @@ final class ChapterLayout {
         guard page >= 0, page < containers.count else { return [] }
         let visible = NSIntersectionRange(range, pageRanges[page])
         guard visible.length > 0 else { return [] }
+        lock.lock()
+        defer { lock.unlock() }
         let glyphs = manager.glyphRange(forCharacterRange: visible, actualCharacterRange: nil)
         var result: [CGRect] = []
         manager.enumerateEnclosingRects(forGlyphRange: glyphs,
@@ -647,6 +653,8 @@ final class ChapterLayout {
 
     func characterIndex(at point: CGPoint, page: Int) -> Int? {
         guard page >= 0, page < containers.count else { return nil }
+        lock.lock()
+        defer { lock.unlock() }
         var fraction: CGFloat = 0
         let glyph = manager.glyphIndex(for: point, in: containers[page], fractionOfDistanceThroughGlyph: &fraction)
         let glyphRect = manager.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: containers[page])
@@ -708,7 +716,7 @@ struct Pagination: Codable {
 /// Setzt Kapitel bei Bedarf, hält die zuletzt benutzten im Speicher und merkt sich
 /// die Seitenaufteilung auf der Platte, damit das Buch beim nächsten Mal sofort offen ist.
 final class BookEngine {
-    static let version = "t1"
+    static let version = "t2"
 
     let root: URL
     let files: [URL]
@@ -778,7 +786,7 @@ final class BookEngine {
         cache[chapter] = built
         recent.removeAll { $0 == chapter }
         recent.append(chapter)
-        while recent.count > 5 {
+        while recent.count > 6 {
             let oldest = recent.removeFirst()
             cache.removeValue(forKey: oldest)
         }
@@ -799,6 +807,9 @@ final class BookEngine {
         lock.unlock()
         if let cached { return cached }
         guard let currentLayout else { return nil }
+        if Thread.isMainThread {
+            ReaderDiagnostics.shared.recordMainBuild()
+        }
         let built = build(chapter: index, layout: currentLayout, theme: currentTheme)
         store(built, chapter: index, generation: currentGeneration)
         lock.lock()

@@ -15,47 +15,70 @@ struct CoverDisplayInfo {
     var progress: Double
 }
 
-/// Das, was auf dem Außendisplay erscheint, während innen gelesen wird.
+/// Das, was auf dem Außendisplay erscheint, während innen gelesen wird:
+/// das Buchcover über die ganze Fläche, wie ein zugeklapptes Buch von außen.
 struct CoverDisplayView: View {
     let info: CoverDisplayInfo
+    var hint: String?
+    /// true = Cover füllt das ganze Display (Ränder des Bilds werden beschnitten),
+    /// false = ganzes Cover von Kante zu Kante, der Rest wird mit dem Cover selbst gefüllt.
+    @AppStorage("coverFill") private var fill = true
 
     var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
-            if let image = info.image {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
-                    .blur(radius: 50)
-                    .opacity(0.45)
-                    .ignoresSafeArea()
-            }
-            VStack(spacing: 18) {
-                Spacer(minLength: 0)
-                CoverArt(image: info.image, title: info.title, author: info.author)
-                    .aspectRatio(2.0 / 3.0, contentMode: .fit)
-                    .padding(.horizontal, 44)
-                Spacer(minLength: 0)
-                VStack(spacing: 8) {
-                    Text(info.title)
-                        .font(.system(.headline, design: .serif))
-                        .multilineTextAlignment(.center)
-                        .lineLimit(2)
-                    if !info.author.isEmpty {
-                        Text(info.author)
-                            .font(.subheadline)
-                            .opacity(0.7)
-                    }
-                    ProgressView(value: min(1, max(0, info.progress)))
-                        .tint(.white)
-                        .frame(width: 140)
-                        .padding(.top, 4)
+        GeometryReader { geo in
+            ZStack {
+                Color.black
+                if let image = info.image {
+                    // Hintergrund aus dem Cover selbst, damit nirgends eine leere Fläche bleibt
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .blur(radius: 36, opaque: true)
+                        .overlay(Color.black.opacity(0.18))
+                        .clipped()
+                    Image(uiImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: fill ? .fill : .fit)
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .clipped()
+                        .shadow(color: .black.opacity(fill ? 0 : 0.5), radius: 18, y: 6)
+                } else {
+                    GeneratedCover(title: info.title, author: info.author)
                 }
-                .foregroundStyle(.white)
-                .padding(.bottom, 28)
+
+                // Leichter Glanz wie auf einem echten Einband
+                LinearGradient(colors: [.white.opacity(0.10), .clear, .black.opacity(0.16)],
+                               startPoint: .topLeading, endPoint: .bottomTrailing)
+                    .allowsHitTesting(false)
+
+                VStack(spacing: 10) {
+                    Spacer(minLength: 0)
+                    if let hint {
+                        Text(hint)
+                            .font(.system(.footnote, design: .serif).weight(.medium))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(.black.opacity(0.45), in: Capsule())
+                    }
+                    // Schmaler Lesefortschritt am unteren Rand
+                    Capsule()
+                        .fill(.white.opacity(0.28))
+                        .frame(width: min(160, geo.size.width * 0.4), height: 3)
+                        .overlay(alignment: .leading) {
+                            Capsule()
+                                .fill(.white.opacity(0.92))
+                                .frame(width: min(160, geo.size.width * 0.4) * min(1, max(0, info.progress)), height: 3)
+                        }
+                        .shadow(color: .black.opacity(0.5), radius: 2)
+                }
+                .padding(.bottom, max(14, geo.safeAreaInsets.bottom + 6))
+                .frame(width: geo.size.width, height: geo.size.height)
             }
-            .padding(.top, 28)
+            .frame(width: geo.size.width, height: geo.size.height)
         }
+        .ignoresSafeArea()
     }
 }
 
@@ -126,15 +149,50 @@ struct ImmersiveBars: ViewModifier {
 }
 
 enum DuoFold {
-    /// Lage des Falzes, solange das Duo halb aufgeklappt ist. Sonst nil.
-    static func division(_ proxy: GeometryProxy) -> CGRect? {
+    /// Lage des Falzes – auch wenn das Duo flach aufgeklappt ist. Zugeklappt und auf anderen Geräten nil.
+    static func fold(_ proxy: GeometryProxy) -> FoldInfo? {
         #if DUO_FOLD
         if #available(iOS 27.1, *) {
-            return proxy.reservedRegions(kind: .division).first?.frame
+            guard let region = proxy.reservedRegions(kind: .division, options: [.includeInactive]).first else { return nil }
+            return FoldInfo(frame: region.frame, isActive: region.isActive)
         }
         return nil
         #else
         return nil
+        #endif
+    }
+
+    /// Bereiche, die gerade von Hardware oder Systemelementen verdeckt sind (z. B. die Kamera).
+    static func occlusions(_ proxy: GeometryProxy) -> [CGRect] {
+        #if DUO_FOLD
+        if #available(iOS 27.1, *) {
+            return proxy.reservedRegions(kind: .occlusion).map { $0.frame }
+        }
+        return []
+        #else
+        return []
+        #endif
+    }
+
+    /// Alle bekannten Bereiche als Text, für die Diagnose.
+    static func describe(_ proxy: GeometryProxy) -> [String] {
+        #if DUO_FOLD
+        if #available(iOS 27.1, *) {
+            func text(_ rect: CGRect) -> String {
+                "\(Int(rect.minX)),\(Int(rect.minY)) \(Int(rect.width))×\(Int(rect.height))"
+            }
+            var lines: [String] = []
+            for region in proxy.reservedRegions(kind: .division, options: [.includeInactive]) {
+                lines.append("Falz: \(text(region.frame)) \(region.isActive ? "aktiv" : "flach")")
+            }
+            for region in proxy.reservedRegions(kind: .occlusion, options: [.includeInactive]) {
+                lines.append("Verdeckt: \(text(region.frame)) \(region.isActive ? "aktiv" : "inaktiv")")
+            }
+            return lines.isEmpty ? ["Falz: keiner gemeldet"] : lines
+        }
+        return ["Falz: braucht iOS 27.1"]
+        #else
+        return ["Falz: in dieser Version nicht enthalten"]
         #endif
     }
 }

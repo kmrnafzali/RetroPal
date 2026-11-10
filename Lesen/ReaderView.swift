@@ -13,6 +13,7 @@ struct ReaderView: View {
     @AppStorage("pageMargin") private var pageMargin = 26
     @AppStorage("hingeEffect") private var hingeEffect = true
     @AppStorage("coverOnOuter") private var coverOnOuter = false
+    @AppStorage("coverWhenClosed") private var coverWhenClosed = true
 
     @StateObject private var model: ReaderModel
 
@@ -25,7 +26,10 @@ struct ReaderView: View {
     @State private var showContents = false
     @State private var sliderValue = 0.0
     @State private var scrubbing = false
-    @State private var lastSize = CGSize.zero
+    @State private var lastMetrics = ReaderMetrics.empty
+    @State private var insetMemory = InsetMemory()
+    @State private var showClosedCover = false
+    @State private var wasOpen = false
     @State private var isSpread = false
     @State private var hingeDegrees: Double?
     @State private var coverAvailable = false
@@ -86,22 +90,37 @@ struct ReaderView: View {
         ZStack {
             theme.swiftUIBackground.ignoresSafeArea()
 
+            // Das Buch nutzt den ganzen Bildschirm. Ränder, Falz und verdeckte Bereiche
+            // werden als Seitenränder eingerechnet, statt die Fläche zu verkleinern.
             GeometryReader { geo in
-                let fold = DuoFold.division(geo)
-                if let fold, fold.width > fold.height, fold.minY > 160 {
-                    // Tisch-Modus: Seite oben, Steuerung unter dem Falz
-                    VStack(spacing: 0) {
-                        pager(size: CGSize(width: geo.size.width, height: fold.minY))
-                        Color.clear.frame(height: fold.height)
+                let metrics = computeMetrics(geo)
+                ZStack(alignment: .topLeading) {
+                    if metrics.pageWidth > 0 {
+                        PagerView(model: model, spread: metrics.spread)
+                            .id(metrics.spread)
+                            .frame(width: metrics.pagerFrame.width, height: metrics.pagerFrame.height)
+                            .offset(x: metrics.pagerFrame.minX, y: metrics.pagerFrame.minY)
+                    }
+                    if let panel = metrics.panel {
+                        // Tisch-Modus: Seite oben, Steuerung unter dem Falz
                         TabletopPanel(model: model, title: bookTitle, pageLabel: pageLabel,
                                       onClose: close, onSettings: { showSettings = true },
                                       onContents: { showContents = true })
-                            .frame(height: max(0, geo.size.height - fold.maxY))
+                            .frame(width: panel.width, height: panel.height)
+                            .offset(x: panel.minX, y: panel.minY)
                     }
-                } else {
-                    pager(size: geo.size)
+                }
+                .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
+                .onAppear {
+                    configure(metrics, insets: geo.safeAreaInsets, size: geo.size)
+                    noteGeometry(geo, metrics)
+                }
+                .onChange(of: metrics) { _, newMetrics in
+                    configure(newMetrics, insets: geo.safeAreaInsets, size: geo.size)
+                    noteGeometry(geo, newMetrics)
                 }
             }
+            .ignoresSafeArea()
 
             if theme == .candle {
                 CandleGlow()
@@ -111,7 +130,7 @@ struct ReaderView: View {
             if model.isPaginating {
                 loadingOverlay
             }
-            if model.chrome && !model.isPaginating && model.selection == nil {
+            if model.chrome && !model.isPaginating && model.selection == nil && lastMetrics.panel == nil {
                 chromeOverlay
             }
             if let selection = model.selection {
@@ -123,6 +142,17 @@ struct ReaderView: View {
             }
 
             coverLid
+
+            if showClosedCover {
+                // Zugeklappt liegt das Buch mit dem Cover nach oben da.
+                CoverDisplayView(info: coverInfo, hint: "Tippen zum Weiterlesen")
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        withAnimation(.easeInOut(duration: 0.3)) { showClosedCover = false }
+                    }
+                    .transition(.opacity)
+                    .zIndex(5)
+            }
         }
         .modifier(ImmersiveBars())
         .preferredColorScheme(forcedScheme)
@@ -130,10 +160,9 @@ struct ReaderView: View {
         .animation(.spring(response: 0.32, dampingFraction: 0.86), value: model.chrome)
         .animation(.spring(response: 0.32, dampingFraction: 0.86), value: model.selection)
         .animation(.easeInOut(duration: 0.25), value: model.isPaginating)
-        .onChange(of: fontSize) { _, _ in configure(lastSize) }
-        .onChange(of: fontRaw) { _, _ in configure(lastSize) }
-        .onChange(of: lineHeight) { _, _ in configure(lastSize) }
-        .onChange(of: pageMargin) { _, _ in configure(lastSize) }
+        .onChange(of: fontSize) { _, _ in applyLayout() }
+        .onChange(of: fontRaw) { _, _ in applyLayout() }
+        .onChange(of: lineHeight) { _, _ in applyLayout() }
         .onChange(of: theme) { _, newTheme in model.setTheme(newTheme) }
         .onChange(of: model.progress) { _, value in
             if !scrubbing { sliderValue = value }
@@ -146,13 +175,31 @@ struct ReaderView: View {
         .onAppear(perform: start)
         .onChange(of: isSpread) { old, new in
             // Beim Aufklappen des Duo klappt auch der Buchdeckel noch einmal auf.
-            if new && !old && lid == .gone && !closing { openLid() }
+            if new && !old {
+                showClosedCover = false
+                if lid == .gone && !closing { openLid() }
+            }
+        }
+        .onChange(of: hingeDegrees) { _, degrees in
+            // Zuklappen: Das Außendisplay zeigt das Cover wie ein geschlossenes Buch.
+            guard let degrees else { return }
+            if degrees > 60 {
+                wasOpen = true
+            } else if degrees < 25, wasOpen {
+                wasOpen = false
+                if coverWhenClosed && !closing && !model.isPaginating {
+                    withAnimation(.easeInOut(duration: 0.3)) { showClosedCover = true }
+                }
+            }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { library.flushStats() }
         }
         .onDisappear {
             library.flushStats()
         }
         .modifier(DuoSupport(
-            info: CoverDisplayInfo(image: coverImage, title: bookTitle, author: bookAuthor, progress: model.progress),
+            info: coverInfo,
             coverActive: coverOnOuter && isSpread && scenePhase == .active,
             hingeDegrees: $hingeDegrees,
             coverAvailable: $coverAvailable
@@ -180,14 +227,12 @@ struct ReaderView: View {
         }
     }
 
-    private func pager(size: CGSize) -> some View {
-        let spread = size.width >= 560
-        return PagerView(model: model, spread: spread)
-            .id(spread)
-            .frame(width: size.width, height: size.height)
-            .onAppear { configure(size) }
-            .onChange(of: size) { _, newSize in configure(newSize) }
+    private var coverInfo: CoverDisplayInfo {
+        // Auf ganze Prozent gerundet, damit das Außendisplay nicht bei jeder Seite neu aufgebaut wird.
+        CoverDisplayInfo(image: coverImage, title: bookTitle, author: bookAuthor,
+                         progress: (model.progress * 100).rounded() / 100)
     }
+
 
     private func start() {
         let id = bookID
@@ -215,23 +260,64 @@ struct ReaderView: View {
 
     // MARK: Layout
 
-    private func configure(_ size: CGSize) {
-        lastSize = size
-        let width = Int(size.width.rounded(.down))
-        let height = Int(size.height.rounded(.down))
-        guard width > 100, height > 100 else { return }
+    /// Bildschirmmaße in Seitenmaße umrechnen.
+    private func computeMetrics(_ geo: GeometryProxy) -> ReaderMetrics {
+        let raw = geo.safeAreaInsets
+        var top = raw.top
+        var bottom = raw.bottom
+        if insetMemory.size == geo.size {
+            // Blendet sich die Statusleiste aus, soll der Text nicht springen.
+            top = max(top, insetMemory.top)
+            // Eine eingeblendete Tastatur gehört nicht zum Seitenrand.
+            if bottom > 90 { bottom = insetMemory.bottom }
+        } else if bottom > 90 {
+            bottom = 34
+        }
+        return ReaderMetrics.make(
+            full: geo.size,
+            insets: UIEdgeInsets(top: top, left: raw.leading, bottom: bottom, right: raw.trailing),
+            fold: DuoFold.fold(geo),
+            occlusions: DuoFold.occlusions(geo),
+            margin: pageMargin
+        )
+    }
+
+    private func configure(_ metrics: ReaderMetrics, insets: EdgeInsets, size: CGSize) {
+        var memory = insetMemory
+        if memory.size != size {
+            memory = InsetMemory(size: size, top: insets.top, bottom: insets.bottom > 90 ? 34 : insets.bottom)
+        } else {
+            memory.top = max(memory.top, insets.top)
+            if insets.bottom <= 90 { memory.bottom = insets.bottom }
+        }
+        if memory != insetMemory { insetMemory = memory }
+        lastMetrics = metrics
+        applyLayout()
+    }
+
+    private func applyLayout() {
+        let metrics = lastMetrics
+        guard metrics.pageWidth > 100, metrics.height > 100 else { return }
         // Breit (Innendisplay, iPad, Querformat): aufgeschlagenes Buch. Schmal (Außendisplay): Einzelseite.
-        let spread = width >= 560
-        isSpread = spread
-        model.update(layout: PageLayout(
-            pageWidth: spread ? width / 2 : width,
-            height: height,
-            spread: spread,
+        isSpread = metrics.spread
+        model.update(layout: metrics.layout(
             fontSize: fontSize,
             font: ReadingFont(rawValue: fontRaw) ?? .iowan,
             lineHeight: lineHeight,
-            margin: pageMargin + (spread ? 8 : 0)
+            margin: pageMargin
         ))
+    }
+
+    private func noteGeometry(_ geo: GeometryProxy, _ metrics: ReaderMetrics) {
+        let insets = geo.safeAreaInsets
+        var lines = [
+            "Bildschirm: \(Int(geo.size.width))×\(Int(geo.size.height)) pt",
+            "Ränder: oben \(Int(insets.top)), unten \(Int(insets.bottom)), links \(Int(insets.leading)), rechts \(Int(insets.trailing))"
+        ]
+        lines.append(contentsOf: DuoFold.describe(geo))
+        lines.append("Buch: \(metrics.spread ? "Doppelseite" : "Einzelseite"), Seite \(metrics.pageWidth)×\(metrics.height), ab x=\(Int(metrics.pagerFrame.minX))")
+        lines.append("Textrand: oben \(metrics.padTop), unten \(metrics.padBottom), innen \(metrics.padInner), außen \(metrics.padOuter)")
+        ReaderDiagnostics.shared.setGeometry(lines)
     }
 
     // MARK: Buchdeckel
@@ -508,6 +594,14 @@ struct ReaderView: View {
     }
 }
 
+/// Merkt sich die Ränder zu einer Bildschirmgröße, damit kurzzeitige Änderungen
+/// (Statusleiste, Tastatur) das Buch nicht neu umbrechen.
+struct InsetMemory: Equatable {
+    var size = CGSize.zero
+    var top: CGFloat = 0
+    var bottom: CGFloat = 0
+}
+
 enum LidPhase {
     case closed
     case open
@@ -641,6 +735,9 @@ struct ReaderSettingsView: View {
     @AppStorage("pageSound") private var pageSound = false
     @AppStorage("hingeEffect") private var hingeEffect = true
     @AppStorage("coverOnOuter") private var coverOnOuter = false
+    @AppStorage("coverFill") private var coverFill = true
+    @AppStorage("coverWhenClosed") private var coverWhenClosed = true
+    @State private var diagnostics: [String] = []
 
     var body: some View {
         NavigationStack {
@@ -700,11 +797,20 @@ struct ReaderSettingsView: View {
                     Text("Tippe auf die obere Seitenecke für ein Eselsohr. Halte ein Wort gedrückt, um es nachzuschlagen oder den Satz zu markieren.")
                 }
 
+                diagnosticsSection
+
                 if DuoFeatures.coverCompiled {
                     Section {
                         Toggle("Cover auf dem Außendisplay", isOn: $coverOnOuter)
                         if coverOnOuter {
                             LabeledContent("Status", value: coverAvailable ? "Wird angezeigt" : "Nicht verfügbar")
+                        }
+                        Picker("Darstellung", selection: $coverFill) {
+                            Text("Füllt das Display").tag(true)
+                            Text("Ganzes Cover").tag(false)
+                        }
+                        if DuoFeatures.hingeCompiled {
+                            Toggle("Zugeklappt das Cover zeigen", isOn: $coverWhenClosed)
                         }
                     } header: {
                         Text("iPhone Duo")
@@ -713,11 +819,30 @@ struct ReaderSettingsView: View {
                     }
                 }
             }
+            .onAppear {
+                diagnostics = ReaderDiagnostics.shared.summary(maximumRate: UIScreen.main.maximumFramesPerSecond)
+            }
             .navigationTitle("Leseeinstellungen")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Fertig") { dismiss() }
+                }
+            }
+        }
+    }
+
+    /// Messwerte dieses Geräts. Hilft, Ruckler und Layoutfehler einzugrenzen.
+    private var diagnosticsSection: some View {
+        Section {
+            DisclosureGroup("Diagnose") {
+                ForEach(diagnostics, id: \.self) { line in
+                    Text(line)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                ShareLink(item: diagnostics.joined(separator: "\n")) {
+                    Label("Messwerte teilen", systemImage: "square.and.arrow.up")
                 }
             }
         }

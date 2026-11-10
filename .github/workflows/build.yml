@@ -111,6 +111,7 @@ jobs:
           [ -z "$LINE" ] && LINE=$(echo "$LIST" | grep -i "iPhone" | head -1)
           UDID=$(echo "$LINE" | grep -oE '[0-9A-F]{8}-[0-9A-F-]{27}' | head -1)
           echo "::notice::Simulator: $(echo $LINE | cut -c1-80)"
+          rm -rf /tmp/lesen-shots
           set +e
           xcodebuild test \
             -project Lesen.xcodeproj \
@@ -121,11 +122,19 @@ jobs:
             "SWIFT_ACTIVE_COMPILATION_CONDITIONS=\$(inherited) DEBUG DUO_HINGE DUO_COVER DUO_FOLD DUO_BAR" \
             > test.log 2>&1
           code=$?
-          grep -E "error:|Test Case .* (passed|failed)|Executed [0-9]+ tests|Fatal|crashed|Terminating" test.log | sed -E 's#^.*/(Lesen|Tests)/##' | sort -u | head -n 14 | while IFS= read -r line; do
+          grep -E "error:|Test Case .* (passed|failed)|Executed [0-9]+ tests|Fatal|crashed|Terminating" test.log | sed -E 's#^.*/(Lesen|Tests)/##' | sort -u | head -n 30 | while IFS= read -r line; do
             echo "::warning::[test] ${line}"
           done
           mkdir -p shots
           cp /tmp/lesen-shots/*.png shots/ 2>/dev/null
+          cp /tmp/lesen-shots/messung.txt shots/ 2>/dev/null
+          {
+            echo "Exit $code"
+            grep -E "error:|Test Case .* (passed|failed)|Executed [0-9]+ tests|Fatal|crashed|Terminating|XCTAssert" test.log | sed -E 's#^.*/(Lesen|Tests)/##' | sort -u | head -n 80
+            echo "--- simctl"
+            xcrun simctl help 2>&1 | grep -i -E 'fold|hinge|posture'
+            xcrun simctl io "$UDID" enumerate 2>&1 | head -n 40
+          } > shots/tests.txt 2>&1
           echo "::notice::Bildschirmfotos: $(ls shots | tr '\n' ' ') | Exit $code"
           tail -n 5 test.log
           exit 0
@@ -136,4 +145,4 @@ jobs:
           tag_name: preview
           name: Vorschau (automatische Bildschirmfotos)
           prerelease: true
-          files: shots/*.png
+          files: shots/*

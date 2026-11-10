@@ -103,10 +103,16 @@ final class Library: ObservableObject {
         stats = store.stats ?? [:]
     }
 
+    private let saveQueue = DispatchQueue(label: "lesen.speicher", qos: .utility)
+
+    /// Geschrieben wird im Hintergrund, damit das Blättern nie auf die Platte wartet.
     private func save() {
         let store = Store(books: books, shelves: shelves, stats: stats)
-        if let data = try? JSONEncoder().encode(store) {
-            try? data.write(to: Paths.store, options: .atomic)
+        let url = Paths.store
+        saveQueue.async {
+            if let data = try? JSONEncoder().encode(store) {
+                try? data.write(to: url, options: .atomic)
+            }
         }
     }
 
@@ -195,11 +201,40 @@ final class Library: ObservableObject {
         mutate(id) { $0.lastOpened = Date() }
     }
 
+    private struct PendingPosition {
+        var id: UUID
+        var chapter: Int
+        var fraction: Double
+        var progress: Double
+    }
+
+    private var pendingPosition: PendingPosition?
+    private var positionGeneration = 0
+
+    /// Merkt sich die Lesestelle. Übernommen und gesichert wird sie erst kurz nach dem letzten
+    /// Umblättern, damit währenddessen weder Regal noch Platte beschäftigt sind.
     func updatePosition(_ id: UUID, chapter: Int, fraction: Double, progress: Double) {
-        mutate(id) {
-            $0.chapter = chapter
-            $0.fraction = fraction
-            $0.progress = progress
+        if let waiting = pendingPosition, waiting.id != id {
+            flushPosition()
+        }
+        pendingPosition = PendingPosition(id: id, chapter: chapter, fraction: fraction, progress: progress)
+        positionGeneration += 1
+        let expected = positionGeneration
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            guard let self, self.positionGeneration == expected else { return }
+            self.flushPosition()
+        }
+    }
+
+    func flushPosition() {
+        positionGeneration += 1
+        guard let position = pendingPosition else { return }
+        pendingPosition = nil
+        mutate(position.id) {
+            $0.chapter = position.chapter
+            $0.fraction = position.fraction
+            $0.progress = position.progress
             if $0.finished && $0.finishedAt == nil {
                 $0.finishedAt = Date()
             }
@@ -353,25 +388,27 @@ final class Library: ObservableObject {
     }
 
     func addReading(seconds: Int) {
-        stats[key(Date()), default: 0] += seconds
         pendingSeconds += seconds
-        if pendingSeconds >= 30 {
+        if pendingSeconds >= 60 {
             flushStats()
         }
     }
 
+    /// Lesezeit und Lesestelle übernehmen und sichern.
     func flushStats() {
+        flushPosition()
         guard pendingSeconds > 0 else { return }
+        stats[key(Date()), default: 0] += pendingSeconds
         pendingSeconds = 0
         save()
     }
 
     var todaySeconds: Int {
-        stats[key(Date())] ?? 0
+        (stats[key(Date())] ?? 0) + pendingSeconds
     }
 
     var totalSeconds: Int {
-        stats.values.reduce(0, +)
+        stats.values.reduce(0, +) + pendingSeconds
     }
 
     /// Aufeinanderfolgende Tage mit mindestens einer Minute Lesezeit.
