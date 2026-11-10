@@ -51,3 +51,27 @@ targets:
             LSHandlerRank: Alternate
             LSItemContentTypes:
               - org.idpf.epub-container
+  LesenTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests
+    dependencies:
+      - target: Lesen
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: de.kmrn.lesen.tests
+schemes:
+  Lesen:
+    build:
+      targets:
+        Lesen: all
+  Preview:
+    build:
+      targets:
+        Lesen: all
+        LesenTests: [test]
+    test:
+      targets:
+        - LesenTests

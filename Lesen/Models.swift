@@ -171,6 +171,11 @@ final class Library: ObservableObject {
         return book
     }
 
+    /// Nur für die automatischen Vorschau-Tests.
+    func addForTesting(_ book: Book) {
+        books.append(book)
+    }
+
     // MARK: Bücher
 
     func book(_ id: UUID) -> Book? {
