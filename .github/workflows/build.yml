@@ -53,7 +53,7 @@ jobs:
             done
           }
           # Die Duo-Funktionen brauchen das iOS-27.1-SDK. Fehlt es, wird ohne sie gebaut.
-          for flags in "DUO_HINGE DUO_COVER DUO_FOLD" "DUO_HINGE DUO_COVER" "DUO_HINGE" ""; do
+          for flags in "DUO_HINGE DUO_COVER DUO_FOLD DUO_BAR" "DUO_HINGE DUO_COVER DUO_FOLD" "DUO_HINGE DUO_COVER" "DUO_HINGE" ""; do
             if build "$flags"; then
               echo "::notice::Gebaut mit Duo-Funktionen: '${flags:-keine}'"
               exit 0
@@ -118,7 +118,7 @@ jobs:
             -destination "platform=iOS Simulator,id=$UDID" \
             -derivedDataPath build-sim \
             CODE_SIGNING_ALLOWED=NO \
-            "SWIFT_ACTIVE_COMPILATION_CONDITIONS=\$(inherited) DEBUG DUO_HINGE DUO_COVER DUO_FOLD" \
+            "SWIFT_ACTIVE_COMPILATION_CONDITIONS=\$(inherited) DEBUG DUO_HINGE DUO_COVER DUO_FOLD DUO_BAR" \
             > test.log 2>&1
           code=$?
           grep -E "error:|Test Case .* (passed|failed)|Executed [0-9]+ tests|Fatal|crashed|Terminating" test.log | sed -E 's#^.*/(Lesen|Tests)/##' | sort -u | head -n 14 | while IFS= read -r line; do

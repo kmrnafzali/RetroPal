@@ -36,6 +36,8 @@ struct DetailTarget: Identifiable {
 struct LibraryView: View {
     @EnvironmentObject private var library: Library
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.colorScheme) private var colorScheme
+    @AppStorage("themeChoice") private var themeRaw = ThemeChoice.auto.rawValue
 
     @State private var light = DayLight.current
     @State private var showImporter = false
@@ -46,7 +48,7 @@ struct LibraryView: View {
 
     @State private var frameBox = FrameBox()
     @State private var flight: Flight?
-    @State private var readerID: UUID?
+    @State private var reader: DetailTarget?
 
     @State private var coverTarget: UUID?
     @State private var showPhotoPicker = false
@@ -81,8 +83,13 @@ struct LibraryView: View {
             .max { ($0.lastOpened ?? .distantPast) < ($1.lastOpened ?? .distantPast) }
     }
 
+    private var readerPaper: Color {
+        let choice = ThemeChoice(rawValue: themeRaw) ?? .auto
+        return choice.resolve(systemDark: colorScheme == .dark).swiftUIBackground
+    }
+
     var body: some View {
-        GeometryReader { rootGeo in
+        NavigationStack {
             ZStack {
                 RoomBackdrop(light: light)
                     .ignoresSafeArea()
@@ -97,30 +104,47 @@ struct LibraryView: View {
                 } else {
                     shelfContent
                 }
-
-                if let id = readerID, let book = library.book(id) {
-                    ReaderView(book: book) { close(id) }
-                        .id(id)
-                        .transition(.opacity)
-                        .zIndex(1)
+            }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(.hidden, for: .navigationBar)
+            .toolbar {
+                // Mit Titel und Symbol, damit das System sie auf dem iPhone Duo in die seitliche Leiste legen kann.
+                ToolbarItem(placement: .primaryAction) {
+                    Button("Buch hinzufügen", systemImage: "plus") { showImporter = true }
                 }
-
-                if let flight, let book = library.book(flight.bookID) {
+                ToolbarItem(placement: .primaryAction) {
+                    Button("Lesestatistik", systemImage: "chart.bar.xaxis") { showStats = true }
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Button("Neues Regalbrett", systemImage: "books.vertical") { showNewShelf = true }
+                }
+            }
+            .tint(Wood.boardFront)
+        }
+        .onPreferenceChange(CoverFrameKey.self) { frameBox.frames = $0 }
+        .overlay {
+            if let flight, let book = library.book(flight.bookID) {
+                GeometryReader { geo in
                     FlightView(
                         flight: flight,
                         image: library.cover(for: book, large: true),
                         title: book.title,
                         author: book.author,
-                        container: rootGeo.size,
+                        container: geo.size,
+                        paper: readerPaper,
                         onMid: { midFlight(flight) },
                         onDone: { endFlight(flight) }
                     )
-                    .id(flight.id)
-                    .zIndex(2)
                 }
+                .ignoresSafeArea()
+                .id(flight.id)
             }
-            .coordinateSpace(name: "root")
-            .onPreferenceChange(CoverFrameKey.self) { frameBox.frames = $0 }
+        }
+        .fullScreenCover(item: $reader) { target in
+            if let book = library.book(target.id) {
+                ReaderView(book: book) { close(target.id) }
+                    .environmentObject(library)
+            }
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
@@ -139,13 +163,13 @@ struct LibraryView: View {
         .sheet(item: $detail) { target in
             BookDetailView(bookID: target.id, onRead: {
                 detail = nil
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
                     if let book = library.book(target.id) { open(book) }
                 }
             }, onChooseCover: {
                 detail = nil
                 coverTarget = target.id
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showPhotoPicker = true }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { showPhotoPicker = true }
             })
         }
         .photosPicker(isPresented: $showPhotoPicker, selection: $photoItem, matching: .images)
@@ -178,25 +202,28 @@ struct LibraryView: View {
 
     // MARK: Öffnen und Schließen
 
+    /// Das Cover fliegt vom Regal in die Mitte. Dort übernimmt der Leser und klappt es auf.
     private func open(_ book: Book) {
-        guard flight == nil, readerID == nil else { return }
+        guard flight == nil, reader == nil else { return }
         Haptics.medium()
         flight = Flight(bookID: book.id, origin: frameBox.frames[book.id] ?? .zero, opening: true)
     }
 
     private func close(_ id: UUID) {
-        guard flight == nil else { return }
-        Haptics.tap()
         flight = Flight(bookID: id, origin: frameBox.frames[id] ?? .zero, opening: false)
-        withAnimation(.easeOut(duration: 0.35)) {
-            readerID = nil
+        var instant = Transaction()
+        instant.disablesAnimations = true
+        withTransaction(instant) {
+            reader = nil
         }
     }
 
     private func midFlight(_ current: Flight) {
         guard current.opening else { return }
-        withAnimation(.easeIn(duration: 0.4)) {
-            readerID = current.bookID
+        var instant = Transaction()
+        instant.disablesAnimations = true
+        withTransaction(instant) {
+            reader = DetailTarget(id: current.bookID)
         }
     }
 
@@ -225,37 +252,13 @@ struct LibraryView: View {
                 }
             }
             Spacer()
-            HStack(spacing: 10) {
-                roundButton("chart.bar.xaxis") { showStats = true }
-                if library.importing > 0 {
-                    ProgressView().frame(width: 42, height: 42)
-                } else {
-                    Menu {
-                        Button { showImporter = true } label: { Label("Buch hinzufügen", systemImage: "book.closed") }
-                        Button { showNewShelf = true } label: { Label("Neues Regalbrett", systemImage: "books.vertical") }
-                    } label: {
-                        roundLabel("plus")
-                    }
-                }
+            if library.importing > 0 {
+                ProgressView().padding(.bottom, 8)
             }
         }
         .padding(.horizontal, 22)
-        .padding(.top, 14)
+        .padding(.top, 2)
         .padding(.bottom, 6)
-    }
-
-    private func roundLabel(_ symbol: String) -> some View {
-        Image(systemName: symbol)
-            .font(.system(size: 17, weight: .semibold))
-            .foregroundStyle(Color.primary)
-            .frame(width: 42, height: 42)
-            .background(.thinMaterial, in: Circle())
-            .overlay(Circle().stroke(Color.primary.opacity(0.08), lineWidth: 1))
-    }
-
-    private func roundButton(_ symbol: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) { roundLabel(symbol) }
-            .buttonStyle(CardPressStyle())
     }
 
     private var emptyState: some View {
@@ -430,7 +433,7 @@ struct LibraryView: View {
             .background(
                 GeometryReader { geo in
                     Color.clear.preference(key: CoverFrameKey.self,
-                                           value: [book.id: geo.frame(in: .named("root"))])
+                                           value: [book.id: geo.frame(in: .global)])
                 }
             )
             .opacity(flight?.bookID == book.id ? 0 : 1)
@@ -624,6 +627,7 @@ struct BookDetailView: View {
                     .padding(22)
                 }
             }
+            .background(RoomBackdrop(light: DayLight.current).ignoresSafeArea())
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
@@ -703,79 +707,55 @@ struct BookDetailView: View {
     }
 }
 
-/// Das Cover hebt sich vom Regal, schwebt in die Mitte und klappt wie ein Buchdeckel auf.
-struct FlightView: View {
-    enum Phase {
-        case shelf
-        case center
-        case open
+enum CoverGeometry {
+    /// Wo das Cover in der Bildschirmmitte schwebt, bevor es aufklappt.
+    static func centerRect(in container: CGSize) -> CGRect {
+        let height = min(container.height * 0.72, container.width * 0.8 * 1.5)
+        let width = height / 1.5
+        return CGRect(x: (container.width - width) / 2, y: (container.height - height) / 2, width: width, height: height)
     }
+}
 
+/// Das Cover hebt sich vom Regal und schwebt in die Bildschirmmitte (oder beim Schließen zurück).
+/// Das Aufklappen selbst übernimmt der Leser.
+struct FlightView: View {
     let flight: Flight
     let image: UIImage?
     let title: String
     let author: String
     let container: CGSize
+    let paper: Color
     let onMid: () -> Void
     let onDone: () -> Void
 
-    @State private var phase: Phase
+    @State private var centered: Bool
 
-    init(flight: Flight, image: UIImage?, title: String, author: String, container: CGSize,
+    init(flight: Flight, image: UIImage?, title: String, author: String, container: CGSize, paper: Color,
          onMid: @escaping () -> Void, onDone: @escaping () -> Void) {
         self.flight = flight
         self.image = image
         self.title = title
         self.author = author
         self.container = container
+        self.paper = paper
         self.onMid = onMid
         self.onDone = onDone
-        _phase = State(initialValue: flight.opening ? .shelf : .open)
-    }
-
-    private var centerRect: CGRect {
-        let height = min(container.height * 0.74, container.width * 0.82 * 1.5)
-        let width = height / 1.5
-        return CGRect(x: (container.width - width) / 2, y: (container.height - height) / 2, width: width, height: height)
-    }
-
-    private var openRect: CGRect {
-        let height = container.height * 1.02
-        let width = max(container.width * 0.6, height / 1.5)
-        return CGRect(x: (container.width - width) / 2 + width * 0.18, y: (container.height - height) / 2,
-                      width: width, height: height)
+        _centered = State(initialValue: !flight.opening)
     }
 
     private var rect: CGRect {
-        switch phase {
-        case .shelf:
-            if flight.origin.width > 1 { return flight.origin }
-            let fallback = centerRect
-            return fallback.insetBy(dx: fallback.width * 0.3, dy: fallback.height * 0.3)
-        case .center: return centerRect
-        case .open: return openRect
-        }
+        let center = CoverGeometry.centerRect(in: container)
+        if centered { return center }
+        if flight.origin.width > 1 { return flight.origin }
+        return center.insetBy(dx: center.width * 0.3, dy: center.height * 0.3)
     }
 
     var body: some View {
         let current = rect
         ZStack {
-            Color.black
-                .opacity(phase == .center ? 0.5 : 0)
-                .ignoresSafeArea()
-
-            // Seitenblock unter dem Deckel
-            RoundedRectangle(cornerRadius: 4)
-                .fill(Color(red: 0.97, green: 0.95, blue: 0.90))
-                .frame(width: current.width * 0.97, height: current.height * 0.985)
-                .position(x: current.midX + current.width * 0.012, y: current.midY)
-                .opacity(phase == .center ? 1 : 0)
-
+            paper.opacity(centered ? 1 : 0)
             CoverArt(image: image, title: title, author: author)
                 .frame(width: current.width, height: current.height)
-                .rotation3DEffect(.degrees(phase == .open ? -112 : 0), axis: (x: 0, y: 1, z: 0),
-                                  anchor: .leading, perspective: 0.42)
-                .opacity(phase == .open ? 0 : 1)
                 .position(x: current.midX, y: current.midY)
         }
         .frame(width: container.width, height: container.height)
@@ -784,27 +764,21 @@ struct FlightView: View {
 
     private func run() {
         if flight.opening {
-            withAnimation(.spring(response: 0.5, dampingFraction: 0.8)) {
-                phase = .center
+            withAnimation(.spring(response: 0.48, dampingFraction: 0.82)) {
+                centered = true
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.46) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 onMid()
-                withAnimation(.easeInOut(duration: 0.7)) {
-                    phase = .open
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
                     onDone()
                 }
             }
         } else {
-            withAnimation(.easeInOut(duration: 0.5)) {
-                phase = .center
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
-                    phase = .shelf
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                withAnimation(.spring(response: 0.52, dampingFraction: 0.84)) {
+                    centered = false
                 }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
                     onDone()
                 }
             }

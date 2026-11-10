@@ -33,6 +33,8 @@ struct ReaderView: View {
     @State private var noteTarget: UUID?
     @State private var noteText = ""
     @State private var showNote = false
+    @State private var lid: LidPhase = .closed
+    @State private var closing = false
 
     private let ticker = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
 
@@ -105,7 +107,6 @@ struct ReaderView: View {
                 CandleGlow()
             }
 
-            hingeCover
 
             if model.isPaginating {
                 loadingOverlay
@@ -120,7 +121,10 @@ struct ReaderView: View {
                 }
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
+
+            coverLid
         }
+        .modifier(ImmersiveBars())
         .preferredColorScheme(forcedScheme)
         .statusBarHidden(!model.chrome)
         .animation(.spring(response: 0.32, dampingFraction: 0.86), value: model.chrome)
@@ -140,6 +144,10 @@ struct ReaderView: View {
             }
         }
         .onAppear(perform: start)
+        .onChange(of: isSpread) { old, new in
+            // Beim Aufklappen des Duo klappt auch der Buchdeckel noch einmal auf.
+            if new && !old && lid == .gone && !closing { openLid() }
+        }
         .onDisappear {
             library.flushStats()
         }
@@ -189,6 +197,7 @@ struct ReaderView: View {
         model.onToggleBookmark = { index in
             toggleBookmark(at: index)
         }
+        openLid()
         model.setTheme(theme)
         library.markOpened(id)
         library.ensureTOC(id)
@@ -225,26 +234,42 @@ struct ReaderView: View {
         ))
     }
 
-    // MARK: Scharnier-Effekt
+    // MARK: Buchdeckel
 
-    /// Beim Aufklappen des Duo schwingt der Buchdeckel mit dem Scharnier auf.
+    /// Der Deckel liegt beim Öffnen in der Bildschirmmitte und klappt auf.
+    /// Beim Schließen klappt er wieder zu, bevor das Buch ins Regal zurückfliegt.
     @ViewBuilder
-    private var hingeCover: some View {
-        if hingeEffect, isSpread, let degrees = hingeDegrees, degrees < 118 {
-            let t = min(1, max(0, (degrees - 62) / 56))
+    private var coverLid: some View {
+        if lid != .gone {
             GeometryReader { geo in
-                CoverArt(image: coverImage, title: bookTitle, author: bookAuthor)
-                    .frame(width: geo.size.width / 2, height: geo.size.height)
-                    .rotation3DEffect(.degrees(-178 * t), axis: (x: 0, y: 1, z: 0), anchor: .leading, perspective: 0.35)
-                    .offset(x: geo.size.width / 2)
-                    .opacity(t > 0.5 ? 0 : 1)
-                CoverBack(theme: theme)
-                    .frame(width: geo.size.width / 2, height: geo.size.height)
-                    .rotation3DEffect(.degrees(178 * (1 - t)), axis: (x: 0, y: 1, z: 0), anchor: .trailing, perspective: 0.35)
-                    .opacity(t > 0.5 ? Double(2 - 2 * t) : 0)
+                let rect = CoverGeometry.centerRect(in: geo.size)
+                let open = lid == .open
+                ZStack {
+                    theme.swiftUIBackground
+                        .opacity(open ? 0 : 1)
+                    CoverArt(image: coverImage, title: bookTitle, author: bookAuthor)
+                        .frame(width: rect.width, height: rect.height)
+                        .scaleEffect(open ? 1.25 : 1, anchor: .leading)
+                        .rotation3DEffect(.degrees(open ? -118 : 0), axis: (x: 0, y: 1, z: 0),
+                                          anchor: .leading, perspective: 0.42)
+                        .opacity(open ? 0 : 1)
+                        .position(x: rect.midX, y: rect.midY)
+                }
             }
             .ignoresSafeArea()
-            .allowsHitTesting(false)
+            .allowsHitTesting(lid == .closed)
+        }
+    }
+
+    private func openLid() {
+        lid = .closed
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            withAnimation(.easeInOut(duration: 0.75)) {
+                lid = .open
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                if lid == .open { lid = .gone }
+            }
         }
     }
 
@@ -444,8 +469,18 @@ struct ReaderView: View {
     }
 
     private func close() {
+        guard !closing else { return }
+        closing = true
         library.flushStats()
-        onClose()
+        lid = .open
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
+            withAnimation(.easeInOut(duration: 0.5)) {
+                lid = .closed
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) {
+                onClose()
+            }
+        }
     }
 
     // MARK: Lesezeichen
@@ -471,6 +506,12 @@ struct ReaderView: View {
         }
         syncDecor()
     }
+}
+
+enum LidPhase {
+    case closed
+    case open
+    case gone
 }
 
 struct LookupTerm: Identifiable {
@@ -653,9 +694,6 @@ struct ReaderSettingsView: View {
 
                 Section {
                     Toggle("Umblättergeräusch", isOn: $pageSound)
-                    if DuoFeatures.hingeCompiled {
-                        Toggle("Buchdeckel folgt dem Scharnier", isOn: $hingeEffect)
-                    }
                 } header: {
                     Text("Gefühl")
                 } footer: {

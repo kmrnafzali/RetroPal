@@ -109,6 +109,22 @@ private struct CoverBridge: ViewModifier {
     }
 }
 
+/// Beim Lesen soll das Buch die ganze Fläche nutzen und der Buchrücken genau auf dem Falz liegen.
+/// Deshalb verzichtet der Leser auf die seitliche Leiste des iPhone Duo.
+struct ImmersiveBars: ViewModifier {
+    func body(content: Content) -> some View {
+        #if DUO_BAR
+        if #available(iOS 27.1, *) {
+            content.toolbarVerticalBehavior(.disabled)
+        } else {
+            content
+        }
+        #else
+        content
+        #endif
+    }
+}
+
 enum DuoFold {
     /// Lage des Falzes, solange das Duo halb aufgeklappt ist. Sonst nil.
     static func division(_ proxy: GeometryProxy) -> CGRect? {
