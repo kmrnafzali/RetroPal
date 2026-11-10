@@ -327,7 +327,7 @@ final class PreviewTests: XCTestCase {
                     if let fold = item.fold, fold.isActive || fold.frame.height > fold.frame.width {
                         XCTAssertFalse(rect.intersects(fold.frame), "Text im Falz: \(label)")
                     }
-                    for hole in item.holes {
+                    for hole in item.holes where hole.minY >= 1 {
                         XCTAssertFalse(rect.intersects(hole), "Text unter einem verdeckten Bereich: \(label)")
                     }
                 }
@@ -337,7 +337,7 @@ final class PreviewTests: XCTestCase {
                     XCTAssertLessThanOrEqual(header.maxY, rects[index].minY, "Kopfzeile über dem Text: \(label)")
                     XCTAssertGreaterThanOrEqual(header.minX, rects[index].minX - 0.5, label)
                     XCTAssertLessThanOrEqual(header.maxX, rects[index].maxX + 0.5, label)
-                    for hole in item.holes {
+                    for hole in item.holes where hole.minY >= 1 {
                         XCTAssertFalse(header.intersects(hole), "Kopfzeile unter einem verdeckten Bereich: \(label)")
                     }
                     let local = layout.headers[index]

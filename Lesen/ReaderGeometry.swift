@@ -60,7 +60,11 @@ struct ReaderMetrics: Equatable {
         var right = max(0, insets.right)
 
         // Verdeckte Bereiche (Kamera, Statusfeld der Seitenleiste).
-        let holes = occlusions.map { $0.intersection(area) }.filter { !$0.isNull && $0.width >= 1 && $0.height >= 1 }
+        // Bereiche, die oben am Rand hängen, sind Statusfelder. Beim Lesen ist die Statusleiste ausgeblendet,
+        // eingeblendet liegt ohnehin die Leiste des Lesers darüber. Dauerhaft frei bleibt nur, was die
+        // Hardware verdeckt (Kamera).
+        let holes = occlusions.filter { $0.minY >= 1 }
+            .map { $0.intersection(area) }.filter { !$0.isNull && $0.width >= 1 && $0.height >= 1 }
         for hole in holes {
             if hole.maxX <= left || hole.minX >= full.width - right { continue }
             if hole.maxY <= top || hole.minY >= area.height - bottom { continue }
