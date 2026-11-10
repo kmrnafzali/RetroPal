@@ -31,6 +31,7 @@ targets:
       properties:
         CFBundleDisplayName: Lesen
         UILaunchScreen: {}
+        CADisableMinimumFrameDurationOnPhone: true
         NSCameraUsageDescription: Damit dein Buchcover auf dem Außendisplay erscheint, muss die Kamera aktiv sein. Es wird nichts aufgenommen oder gespeichert.
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false

@@ -2,13 +2,6 @@ import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
 
-enum ShelfFilter: Hashable {
-    case all
-    case reading
-    case finished
-    case custom(String)
-}
-
 struct CoverFrameKey: PreferenceKey {
     static var defaultValue: [UUID: CGRect] = [:]
     static func reduce(value: inout [UUID: CGRect], nextValue: () -> [UUID: CGRect]) {
@@ -29,14 +22,27 @@ struct Flight: Identifiable {
     let opening: Bool
 }
 
+struct ShelfSection: Identifiable {
+    let id: String
+    let title: String
+    let books: [Book]
+    let custom: Bool
+}
+
+struct DetailTarget: Identifiable {
+    let id: UUID
+}
+
 struct LibraryView: View {
     @EnvironmentObject private var library: Library
+    @Environment(\.scenePhase) private var scenePhase
 
-    @State private var filter: ShelfFilter = .all
+    @State private var light = DayLight.current
     @State private var showImporter = false
     @State private var showStats = false
     @State private var showNewShelf = false
     @State private var newShelfName = ""
+    @State private var detail: DetailTarget?
 
     @State private var frameBox = FrameBox()
     @State private var flight: Flight?
@@ -46,16 +52,27 @@ struct LibraryView: View {
     @State private var showPhotoPicker = false
     @State private var photoItem: PhotosPickerItem?
 
-    private var visibleBooks: [Book] {
-        let sorted = library.books.sorted {
-            ($0.lastOpened ?? $0.addedAt) > ($1.lastOpened ?? $1.addedAt)
+    private var recent: [Book] {
+        library.books.sorted { ($0.lastOpened ?? $0.addedAt) > ($1.lastOpened ?? $1.addedAt) }
+    }
+
+    private var sections: [ShelfSection] {
+        let all = recent
+        var result: [ShelfSection] = []
+        let reading = all.filter { $0.started }
+        if !reading.isEmpty {
+            result.append(ShelfSection(id: "#lese-ich", title: "Lese ich", books: reading, custom: false))
         }
-        switch filter {
-        case .all: return sorted
-        case .reading: return sorted.filter { $0.started }
-        case .finished: return sorted.filter { $0.finished }
-        case .custom(let name): return sorted.filter { $0.shelves.contains(name) }
+        for shelf in library.shelves {
+            result.append(ShelfSection(id: "regal-" + shelf, title: shelf,
+                                       books: all.filter { $0.shelves.contains(shelf) }, custom: true))
         }
+        result.append(ShelfSection(id: "#alle", title: "Alle Bücher", books: all, custom: false))
+        let finished = all.filter { $0.finished }
+        if !finished.isEmpty {
+            result.append(ShelfSection(id: "#gelesen", title: "Ausgelesen", books: finished, custom: false))
+        }
+        return result
     }
 
     private var resumeBook: Book? {
@@ -67,28 +84,18 @@ struct LibraryView: View {
     var body: some View {
         GeometryReader { rootGeo in
             ZStack {
-                NavigationStack {
-                    Group {
-                        if library.books.isEmpty {
-                            emptyState
-                        } else {
-                            shelfContent
-                        }
+                RoomBackdrop(light: light)
+                    .ignoresSafeArea()
+
+                if library.books.isEmpty {
+                    VStack(spacing: 0) {
+                        header
+                        Spacer()
+                        emptyState
+                        Spacer()
                     }
-                    .background(backdrop.ignoresSafeArea())
-                    .navigationTitle("Bibliothek")
-                    .toolbar {
-                        ToolbarItem(placement: .topBarLeading) {
-                            Button { showStats = true } label: { Image(systemName: "chart.bar.xaxis") }
-                        }
-                        ToolbarItem(placement: .primaryAction) {
-                            if library.importing > 0 {
-                                ProgressView()
-                            } else {
-                                Button { showImporter = true } label: { Image(systemName: "plus") }
-                            }
-                        }
-                    }
+                } else {
+                    shelfContent
                 }
 
                 if let id = readerID, let book = library.book(id) {
@@ -115,6 +122,11 @@ struct LibraryView: View {
             .coordinateSpace(name: "root")
             .onPreferenceChange(CoverFrameKey.self) { frameBox.frames = $0 }
         }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                withAnimation(.easeInOut(duration: 1.2)) { light = DayLight.current }
+            }
+        }
         .sheet(isPresented: $showImporter) {
             DocumentPicker { urls in
                 for url in urls { library.importBook(from: url) }
@@ -123,6 +135,18 @@ struct LibraryView: View {
         }
         .sheet(isPresented: $showStats) {
             StatsView()
+        }
+        .sheet(item: $detail) { target in
+            BookDetailView(bookID: target.id, onRead: {
+                detail = nil
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    if let book = library.book(target.id) { open(book) }
+                }
+            }, onChooseCover: {
+                detail = nil
+                coverTarget = target.id
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showPhotoPicker = true }
+            })
         }
         .photosPicker(isPresented: $showPhotoPicker, selection: $photoItem, matching: .images)
         .onChange(of: photoItem) { _, item in
@@ -134,8 +158,8 @@ struct LibraryView: View {
                 photoItem = nil
             }
         }
-        .alert("Neues Regal", isPresented: $showNewShelf) {
-            TextField("Name", text: $newShelfName)
+        .alert("Neues Regalbrett", isPresented: $showNewShelf) {
+            TextField("Name, z. B. Fantasy", text: $newShelfName)
             Button("Anlegen") {
                 library.addShelf(newShelfName)
                 newShelfName = ""
@@ -150,14 +174,6 @@ struct LibraryView: View {
         } message: {
             Text(library.importError ?? "")
         }
-    }
-
-    private var backdrop: some View {
-        LinearGradient(
-            colors: [Color(uiColor: .systemBackground), Color(uiColor: .secondarySystemBackground)],
-            startPoint: .top,
-            endPoint: .bottom
-        )
     }
 
     // MARK: Öffnen und Schließen
@@ -190,50 +206,115 @@ struct LibraryView: View {
         }
     }
 
-    // MARK: Leerer Zustand
+    // MARK: Kopf
+
+    private var header: some View {
+        HStack(alignment: .bottom) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(light.greeting.uppercased())
+                    .font(.system(size: 11, weight: .semibold))
+                    .tracking(1.8)
+                    .foregroundStyle(.secondary)
+                Text("Bibliothek")
+                    .font(.system(size: 36, weight: .bold, design: .serif))
+                if !library.books.isEmpty {
+                    Text(library.books.count == 1 ? "Ein Buch im Regal" : "\(library.books.count) Bücher im Regal")
+                        .font(.system(.footnote, design: .serif))
+                        .italic()
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer()
+            HStack(spacing: 10) {
+                roundButton("chart.bar.xaxis") { showStats = true }
+                if library.importing > 0 {
+                    ProgressView().frame(width: 42, height: 42)
+                } else {
+                    Menu {
+                        Button { showImporter = true } label: { Label("Buch hinzufügen", systemImage: "book.closed") }
+                        Button { showNewShelf = true } label: { Label("Neues Regalbrett", systemImage: "books.vertical") }
+                    } label: {
+                        roundLabel("plus")
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 22)
+        .padding(.top, 14)
+        .padding(.bottom, 6)
+    }
+
+    private func roundLabel(_ symbol: String) -> some View {
+        Image(systemName: symbol)
+            .font(.system(size: 17, weight: .semibold))
+            .foregroundStyle(Color.primary)
+            .frame(width: 42, height: 42)
+            .background(.thinMaterial, in: Circle())
+            .overlay(Circle().stroke(Color.primary.opacity(0.08), lineWidth: 1))
+    }
+
+    private func roundButton(_ symbol: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) { roundLabel(symbol) }
+            .buttonStyle(CardPressStyle())
+    }
 
     private var emptyState: some View {
-        ContentUnavailableView {
-            Label("Dein Regal ist leer", systemImage: "books.vertical")
-        } description: {
-            Text("Importiere eine EPUB-Datei, um loszulegen.")
-        } actions: {
-            Button("EPUB importieren") { showImporter = true }
-                .buttonStyle(.borderedProminent)
+        VStack(spacing: 18) {
+            ZStack(alignment: .bottom) {
+                ShelfNiche().frame(height: 120)
+                Text("Hier ist noch Platz")
+                    .font(.system(.callout, design: .serif))
+                    .italic()
+                    .foregroundStyle(.white.opacity(0.55))
+                    .padding(.bottom, 44)
+            }
+            .overlay(alignment: .bottom) { ShelfBoard().offset(y: 22).padding(.horizontal, -6) }
+            .padding(.horizontal, 30)
+            .padding(.bottom, 30)
+
+            Text("Dein Regal ist leer")
+                .font(.system(.title2, design: .serif).weight(.semibold))
+            Text("Füge eine EPUB-Datei hinzu, um loszulegen.")
+                .font(.system(.subheadline, design: .serif))
+                .foregroundStyle(.secondary)
+            Button { showImporter = true } label: {
+                Text("Buch hinzufügen")
+                    .font(.system(.headline, design: .serif))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 26)
+                    .padding(.vertical, 13)
+                    .background(Wood.boardFront, in: Capsule())
+                    .shadow(color: .black.opacity(0.3), radius: 6, y: 3)
+            }
+            .buttonStyle(CardPressStyle())
         }
+        .padding(.horizontal, 20)
     }
 
     // MARK: Regal
 
     private var shelfContent: some View {
         GeometryReader { geo in
-            let spacing: CGFloat = 18
-            let inset: CGFloat = 22
-            let perRow = max(2, Int((geo.size.width - 2 * inset + spacing) / (112 + spacing)))
+            let spacing: CGFloat = 16
+            let inset: CGFloat = 30
+            let perRow = max(2, Int((geo.size.width - 2 * inset + spacing) / (104 + spacing)))
             let cellWidth = (geo.size.width - 2 * inset - spacing * CGFloat(perRow - 1)) / CGFloat(perRow)
-            let rows = chunk(visibleBooks, size: perRow)
 
             ScrollView {
-                VStack(spacing: 26) {
-                    chips
+                VStack(alignment: .leading, spacing: 0) {
+                    header
 
-                    if filter == .all, let last = resumeBook {
+                    if let last = resumeBook {
                         resumeCard(last)
+                            .padding(.top, 12)
                     }
 
-                    if visibleBooks.isEmpty {
-                        Text("Hier steht noch nichts.")
-                            .font(.system(.body, design: .serif))
-                            .foregroundStyle(.secondary)
-                            .padding(.top, 40)
-                    }
-
-                    ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                        shelfRow(row, cellWidth: cellWidth, spacing: spacing, inset: inset, perRow: perRow)
+                    ForEach(sections) { section in
+                        sectionView(section, cellWidth: cellWidth, spacing: spacing, inset: inset, perRow: perRow)
+                            .padding(.top, 30)
                     }
                 }
-                .padding(.vertical, 12)
-                .animation(.spring(response: 0.5, dampingFraction: 0.85), value: filter)
+                .padding(.bottom, 40)
             }
         }
     }
@@ -245,37 +326,85 @@ struct LibraryView: View {
         }
     }
 
-    private func shelfRow(_ row: [Book], cellWidth: CGFloat, spacing: CGFloat, inset: CGFloat, perRow: Int) -> some View {
-        VStack(spacing: 0) {
-            HStack(alignment: .bottom, spacing: spacing) {
-                ForEach(row) { book in
-                    Button { open(book) } label: {
-                        shelfBook(book)
-                            .frame(width: cellWidth, height: cellWidth * 1.5)
+    private func sectionView(_ section: ShelfSection, cellWidth: CGFloat, spacing: CGFloat,
+                             inset: CGFloat, perRow: Int) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            BrassPlate(text: section.title)
+                .padding(.leading, 22)
+                .contextMenu {
+                    if section.custom {
+                        Button(role: .destructive) {
+                            library.deleteShelf(section.title)
+                        } label: {
+                            Label("Regalbrett entfernen", systemImage: "trash")
+                        }
                     }
-                    .buttonStyle(BookPressStyle())
-                    .contextMenu { menu(for: book) }
-                    .transition(.asymmetric(
-                        insertion: .move(edge: .top).combined(with: .opacity),
-                        removal: .scale(scale: 0.6).combined(with: .opacity)
-                    ))
                 }
-                if row.count < perRow { Spacer(minLength: 0) }
+
+            if section.books.isEmpty {
+                shelfRow([], cellWidth: cellWidth, spacing: spacing, inset: inset, perRow: perRow,
+                         hint: "Halte ein Buch gedrückt, um es hierher zu stellen.")
+            } else {
+                VStack(spacing: 18) {
+                    ForEach(Array(chunk(section.books, size: perRow).enumerated()), id: \.offset) { _, row in
+                        shelfRow(row, cellWidth: cellWidth, spacing: spacing, inset: inset, perRow: perRow, hint: nil)
+                    }
+                }
             }
-            .padding(.horizontal, inset)
-            .zIndex(1)
+        }
+    }
+
+    private func shelfRow(_ row: [Book], cellWidth: CGFloat, spacing: CGFloat, inset: CGFloat,
+                          perRow: Int, hint: String?) -> some View {
+        let bookHeight = cellWidth * 1.5
+        return VStack(spacing: 0) {
+            ZStack(alignment: .bottom) {
+                ShelfNiche()
+                    .padding(.horizontal, 12)
+
+                if let hint {
+                    Text(hint)
+                        .font(.system(.footnote, design: .serif))
+                        .italic()
+                        .foregroundStyle(.white.opacity(0.5))
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 40)
+                        .frame(maxHeight: .infinity)
+                }
+
+                HStack(alignment: .bottom, spacing: spacing) {
+                    ForEach(row) { book in
+                        Button { open(book) } label: {
+                            shelfBook(book)
+                                .frame(width: cellWidth, height: bookHeight)
+                        }
+                        .buttonStyle(BookPressStyle())
+                        .contextMenu { menu(for: book) }
+                        .transition(.asymmetric(
+                            insertion: .move(edge: .top).combined(with: .opacity),
+                            removal: .scale(scale: 0.6).combined(with: .opacity)
+                        ))
+                    }
+                    if row.count < perRow { Spacer(minLength: 0) }
+                }
+                .padding(.horizontal, inset)
+            }
+            .frame(height: bookHeight + 26)
 
             ShelfBoard()
                 .padding(.horizontal, 6)
+                .zIndex(1)
 
-            HStack(alignment: .top, spacing: spacing) {
-                ForEach(row) { book in
-                    caption(book).frame(width: cellWidth, alignment: .leading)
+            if hint == nil {
+                HStack(alignment: .top, spacing: spacing) {
+                    ForEach(row) { book in
+                        caption(book).frame(width: cellWidth, alignment: .leading)
+                    }
+                    if row.count < perRow { Spacer(minLength: 0) }
                 }
-                if row.count < perRow { Spacer(minLength: 0) }
+                .padding(.horizontal, inset)
+                .padding(.top, 12)
             }
-            .padding(.horizontal, inset)
-            .padding(.top, 10)
         }
     }
 
@@ -293,7 +422,7 @@ struct LibraryView: View {
                     Image(systemName: "checkmark.seal.fill")
                         .font(.title3)
                         .symbolRenderingMode(.palette)
-                        .foregroundStyle(.white, Color(red: 0.72, green: 0.58, blue: 0.28))
+                        .foregroundStyle(.white, Wood.brass)
                         .shadow(radius: 2)
                         .padding(8)
                 }
@@ -308,27 +437,32 @@ struct LibraryView: View {
     }
 
     private func caption(_ book: Book) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: 2) {
             Text(book.title)
                 .font(.system(.caption, design: .serif).weight(.semibold))
                 .lineLimit(2)
             if !book.author.isEmpty {
                 Text(book.author)
-                    .font(.caption2)
+                    .font(.system(.caption2, design: .serif))
+                    .italic()
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
-            if book.started {
-                ProgressView(value: book.progress)
-                    .tint(Color(red: 0.70, green: 0.16, blue: 0.17))
-                    .scaleEffect(x: 1, y: 0.6, anchor: .center)
-                    .padding(.top, 1)
+            if let rating = book.rating, rating > 0 {
+                Text(String(repeating: "★", count: rating))
+                    .font(.system(size: 9))
+                    .foregroundStyle(Wood.brass)
             }
         }
     }
 
     @ViewBuilder
     private func menu(for book: Book) -> some View {
+        Button {
+            detail = DetailTarget(id: book.id)
+        } label: {
+            Label("Buch umdrehen", systemImage: "arrow.triangle.2.circlepath")
+        }
         if !library.shelves.isEmpty {
             Menu {
                 ForEach(library.shelves, id: \.self) { shelf in
@@ -343,7 +477,7 @@ struct LibraryView: View {
                     }
                 }
             } label: {
-                Label("Zu Regal hinzufügen", systemImage: "books.vertical")
+                Label("Auf Regalbrett stellen", systemImage: "books.vertical")
             }
         }
         Button {
@@ -372,134 +506,200 @@ struct LibraryView: View {
         }
     }
 
-    // MARK: Filter
-
-    private var chips: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                chip("Alle", .all)
-                chip("Lese ich", .reading)
-                chip("Gelesen", .finished)
-                ForEach(library.shelves, id: \.self) { shelf in
-                    chip(shelf, .custom(shelf))
-                        .contextMenu {
-                            Button(role: .destructive) {
-                                if filter == .custom(shelf) { filter = .all }
-                                library.deleteShelf(shelf)
-                            } label: {
-                                Label("Regal löschen", systemImage: "trash")
-                            }
-                        }
-                }
-                Button { showNewShelf = true } label: {
-                    Label("Regal", systemImage: "plus")
-                        .font(.subheadline)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 7)
-                        .overlay(Capsule().stroke(Color.secondary.opacity(0.5), style: StrokeStyle(lineWidth: 1, dash: [4])))
-                }
-                .buttonStyle(.plain)
-            }
-            .padding(.horizontal, 22)
-        }
-    }
-
-    private func chip(_ title: String, _ value: ShelfFilter) -> some View {
-        Button {
-            Haptics.tap()
-            filter = value
-        } label: {
-            Text(title)
-                .font(.subheadline.weight(filter == value ? .semibold : .regular))
-                .padding(.horizontal, 14)
-                .padding(.vertical, 7)
-                .foregroundStyle(filter == value ? Color(uiColor: .systemBackground) : Color.primary)
-                .background(filter == value ? Color.primary : Color.secondary.opacity(0.14), in: Capsule())
-        }
-        .buttonStyle(.plain)
-        .animation(.easeInOut(duration: 0.2), value: filter)
-    }
-
     private func resumeCard(_ book: Book) -> some View {
         Button { open(book) } label: {
             HStack(spacing: 16) {
                 CoverArt(image: library.cover(for: book), title: book.title, author: book.author)
-                    .frame(width: 62, height: 93)
-                VStack(alignment: .leading, spacing: 5) {
+                    .frame(width: 66, height: 99)
+                VStack(alignment: .leading, spacing: 6) {
                     Text("WEITERLESEN")
-                        .font(.caption2.weight(.semibold))
-                        .tracking(1.2)
-                        .foregroundStyle(.secondary)
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .tracking(1.6)
+                        .foregroundStyle(Wood.brass)
                     Text(book.title)
                         .font(.system(.title3, design: .serif).weight(.semibold))
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
-                    ProgressView(value: book.progress)
-                        .tint(Color.primary)
-                    Text("\(Int((book.progress * 100).rounded())) % gelesen")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    if !book.author.isEmpty {
+                        Text(book.author)
+                            .font(.system(.footnote, design: .serif))
+                            .italic()
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    HStack(spacing: 10) {
+                        ProgressView(value: book.progress)
+                            .tint(Wood.ribbon)
+                        Text("\(Int((book.progress * 100).rounded())) %")
+                            .font(.system(.caption, design: .serif))
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 Spacer(minLength: 0)
-                Image(systemName: "book.pages")
-                    .font(.title2)
-                    .foregroundStyle(.secondary)
             }
             .padding(16)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .stroke(Color.primary.opacity(0.06), lineWidth: 1)
-            )
+            .foregroundStyle(Color.primary)
+            .paperCard()
         }
         .buttonStyle(CardPressStyle())
         .padding(.horizontal, 22)
     }
 }
 
-// MARK: - Bausteine
+// MARK: - Buchrückseite
 
-struct BookPressStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .rotation3DEffect(.degrees(configuration.isPressed ? -14 : 0), axis: (x: 0, y: 1, z: 0),
-                              anchor: .leading, perspective: 0.5)
-            .scaleEffect(configuration.isPressed ? 1.04 : 1, anchor: .bottom)
-            .offset(y: configuration.isPressed ? -6 : 0)
-            .animation(.spring(response: 0.3, dampingFraction: 0.6), value: configuration.isPressed)
-    }
-}
+/// Das Buch von nah: vorn das Cover, per Tipp umgedreht die Rückseite mit Fortschritt und Lesetagebuch.
+struct BookDetailView: View {
+    @EnvironmentObject private var library: Library
+    @Environment(\.dismiss) private var dismiss
+    let bookID: UUID
+    let onRead: () -> Void
+    let onChooseCover: () -> Void
 
-struct CardPressStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .scaleEffect(configuration.isPressed ? 0.97 : 1)
-            .animation(.spring(response: 0.3, dampingFraction: 0.7), value: configuration.isPressed)
-    }
-}
+    @State private var flipped = false
+    @State private var review = ""
 
-struct ShelfBoard: View {
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "de_DE")
+        formatter.dateStyle = .long
+        return formatter
+    }()
+
     var body: some View {
-        VStack(spacing: 0) {
-            // Oberkante, auf der die Bücher stehen
-            Rectangle()
-                .fill(LinearGradient(
-                    colors: [Color(red: 0.70, green: 0.53, blue: 0.36), Color(red: 0.60, green: 0.43, blue: 0.28)],
-                    startPoint: .top,
-                    endPoint: .bottom
-                ))
-                .frame(height: 5)
-            // Vorderkante
-            Rectangle()
-                .fill(LinearGradient(
-                    colors: [Color(red: 0.50, green: 0.34, blue: 0.21), Color(red: 0.33, green: 0.21, blue: 0.12)],
-                    startPoint: .top,
-                    endPoint: .bottom
-                ))
-                .frame(height: 11)
+        NavigationStack {
+            ScrollView {
+                if let book = library.book(bookID) {
+                    VStack(spacing: 22) {
+                        ZStack {
+                            CoverArt(image: library.cover(for: book, large: true), title: book.title, author: book.author)
+                                .opacity(flipped ? 0 : 1)
+                            backSide(book)
+                                .rotation3DEffect(.degrees(180), axis: (x: 0, y: 1, z: 0))
+                                .opacity(flipped ? 1 : 0)
+                        }
+                        .frame(width: 220, height: 330)
+                        .rotation3DEffect(.degrees(flipped ? 180 : 0), axis: (x: 0, y: 1, z: 0), perspective: 0.4)
+                        .onTapGesture {
+                            Haptics.soft()
+                            withAnimation(.spring(response: 0.7, dampingFraction: 0.78)) { flipped.toggle() }
+                        }
+                        .padding(.top, 10)
+
+                        Text(flipped ? "Tippen für die Vorderseite" : "Tippen zum Umdrehen")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        VStack(spacing: 4) {
+                            Text(book.title)
+                                .font(.system(.title2, design: .serif).weight(.bold))
+                                .multilineTextAlignment(.center)
+                            if !book.author.isEmpty {
+                                Text(book.author)
+                                    .font(.system(.body, design: .serif))
+                                    .italic()
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+
+                        Button(action: onRead) {
+                            Text(book.started ? "Weiterlesen" : (book.finished ? "Noch einmal lesen" : "Lesen"))
+                                .font(.system(.headline, design: .serif))
+                                .foregroundStyle(.white)
+                                .frame(maxWidth: 260)
+                                .padding(.vertical, 14)
+                                .background(Wood.boardFront, in: Capsule())
+                        }
+                        .buttonStyle(CardPressStyle())
+
+                        journal(book)
+
+                        Button(action: onChooseCover) {
+                            Label("Cover aus Fotos wählen", systemImage: "photo")
+                                .font(.subheadline)
+                        }
+                        .tint(Wood.brass)
+                    }
+                    .padding(22)
+                }
+            }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Fertig") {
+                        library.setReview(bookID, review)
+                        dismiss()
+                    }
+                }
+            }
+            .onAppear { review = library.book(bookID)?.review ?? "" }
+            .onDisappear { library.setReview(bookID, review) }
         }
-        .clipShape(RoundedRectangle(cornerRadius: 2))
-        .shadow(color: .black.opacity(0.35), radius: 6, y: 6)
+    }
+
+    private func backSide(_ book: Book) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("ÜBER DIESES EXEMPLAR")
+                .font(.system(size: 9.5, weight: .semibold))
+                .tracking(1.4)
+                .foregroundStyle(Wood.brassDark)
+            fact("Fortschritt", "\(Int((book.progress * 100).rounded())) %")
+            fact("Kapitel", "\(book.toc?.count ?? book.spine.count)")
+            fact("Lesezeichen", "\(book.bookmarks.count)")
+            fact("Markierungen", "\(book.highlights?.count ?? 0)")
+            fact("Im Regal seit", BookDetailView.dateFormatter.string(from: book.addedAt))
+            if let finished = book.finishedAt {
+                fact("Ausgelesen am", BookDetailView.dateFormatter.string(from: finished))
+            }
+            Spacer(minLength: 0)
+            ProgressView(value: book.progress)
+                .tint(Wood.ribbon)
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Color(red: 0.96, green: 0.93, blue: 0.86))
+        .clipShape(RoundedRectangle(cornerRadius: 5))
+        .shadow(color: .black.opacity(0.3), radius: 5, x: -3, y: 5)
+    }
+
+    private func fact(_ name: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(name)
+                .font(.system(size: 10))
+                .foregroundStyle(Wood.ink.opacity(0.55))
+            Text(value)
+                .font(.system(size: 14, weight: .semibold, design: .serif))
+                .foregroundStyle(Wood.ink)
+        }
+    }
+
+    private func journal(_ book: Book) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("LESETAGEBUCH")
+                .font(.system(size: 10.5, weight: .semibold))
+                .tracking(1.6)
+                .foregroundStyle(Wood.brass)
+            HStack(spacing: 8) {
+                ForEach(1...5, id: \.self) { star in
+                    Button {
+                        Haptics.tap()
+                        library.setRating(bookID, star)
+                    } label: {
+                        Image(systemName: star <= (book.rating ?? 0) ? "star.fill" : "star")
+                            .font(.title2)
+                            .foregroundStyle(Wood.brass)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            TextField("Was bleibt dir von diesem Buch?", text: $review, axis: .vertical)
+                .font(.system(.body, design: .serif))
+                .lineLimit(3...8)
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .paperCard()
     }
 }
 

@@ -24,6 +24,10 @@ struct PagerView: UIViewControllerRepresentable {
         pager.view.backgroundColor = model.theme.background
         context.coordinator.pager = pager
         context.coordinator.showPlaceholders()
+        let coordinator = context.coordinator
+        model.turnHandler = { [weak coordinator] forward in
+            coordinator?.turn(forward: forward)
+        }
 
         for recognizer in pager.gestureRecognizers where recognizer is UITapGestureRecognizer {
             recognizer.isEnabled = false
@@ -47,6 +51,7 @@ struct PagerView: UIViewControllerRepresentable {
         weak var pager: UIPageViewController?
 
         private var builtVersion = -1
+        private var decorVersion = -1
         private var lastJump: UUID?
         private var cache: [Int: PageVC] = [:]
         private var animating = false
@@ -65,18 +70,14 @@ struct PagerView: UIViewControllerRepresentable {
         // MARK: Zustand abgleichen
 
         func showPlaceholders() {
-            guard let pager, let layout = placeholderLayout() else { return }
+            guard let pager else { return }
+            let layout = model.layout ?? PageLayout(pageWidth: 300, height: 500, spread: spread, fontSize: 18,
+                                                    font: .iowan, lineHeight: 1.5, margin: 24)
             func blank(_ index: Int, _ side: PageSide) -> PageVC {
-                PageVC(index: index, info: nil, fileURL: nil, root: model.root, layout: layout,
-                       theme: model.theme, side: side)
+                PageVC(index: index, info: nil, model: model, layout: layout, theme: model.theme, side: side)
             }
             let controllers = spread ? [blank(-2, .left), blank(-1, .right)] : [blank(-1, .single)]
             pager.setViewControllers(controllers, direction: .forward, animated: false, completion: nil)
-        }
-
-        private func placeholderLayout() -> PageLayout? {
-            model.layout ?? PageLayout(pageWidth: 300, height: 500, spread: spread, fontSize: 18,
-                                       font: .iowan, lineHeight: 1.5, margin: 24)
         }
 
         func sync() {
@@ -92,6 +93,12 @@ struct PagerView: UIViewControllerRepresentable {
                 lastJump = jump.id
                 if !model.counts.isEmpty {
                     show(jump.index, animated: false, forward: true)
+                }
+            }
+            if decorVersion != model.decorVersion {
+                decorVersion = model.decorVersion
+                for controller in cache.values {
+                    controller.reloadDecor()
                 }
             }
         }
@@ -125,7 +132,6 @@ struct PagerView: UIViewControllerRepresentable {
 
             let side: PageSide = spread ? (index % 2 == 0 ? .left : .right) : .single
             var info: PageInfo?
-            var file: URL?
             if let location = model.locate(index), location.chapter < model.files.count {
                 info = PageInfo(
                     chapter: location.chapter,
@@ -133,10 +139,9 @@ struct PagerView: UIViewControllerRepresentable {
                     number: index + 1,
                     title: model.title(forChapter: location.chapter)
                 )
-                file = model.files[location.chapter]
             }
-            let created = PageVC(index: index, info: info, fileURL: file, root: model.root,
-                                 layout: layout, theme: model.theme, side: side)
+            let created = PageVC(index: index, info: info, model: model, layout: layout,
+                                 theme: model.theme, side: side)
             cache[index] = created
             return created
         }
@@ -149,10 +154,10 @@ struct PagerView: UIViewControllerRepresentable {
             }
         }
 
-        /// Lädt Nachbarseiten vor, damit beim Umblättern keine leere Seite erscheint.
+        /// Hält die Nachbarseiten bereit und räumt weiter entfernte ab.
         private func prefetch(around index: Int) {
             let base = spread ? index - index % 2 : index
-            let range = spread ? (base - 2)...(base + 3) : (base - 1)...(base + 1)
+            let range = spread ? (base - 4)...(base + 5) : (base - 2)...(base + 2)
             for neighbour in range {
                 controller(neighbour)?.loadViewIfNeeded()
             }
@@ -201,8 +206,27 @@ struct PagerView: UIViewControllerRepresentable {
 
         @objc func handleTap(_ recognizer: UITapGestureRecognizer) {
             guard let view = recognizer.view else { return }
+
+            // Auswahl aufheben, falls eine besteht
+            if model.selection != nil {
+                model.select(nil)
+                return
+            }
+
+            // Tippen auf die äußere obere Ecke knickt ein Eselsohr
+            if let pages = pager?.viewControllers as? [PageVC] {
+                for page in pages where page.isViewLoaded {
+                    let local = recognizer.location(in: page.view)
+                    if page.view.bounds.contains(local), page.isCorner(local) {
+                        Haptics.medium()
+                        model.onToggleBookmark?(page.index)
+                        return
+                    }
+                }
+            }
+
             let x = recognizer.location(in: view).x / max(1, view.bounds.width)
-            let edge = spread ? 0.16 : 0.22
+            let edge = spread ? 0.16 : 0.24
             if x < edge {
                 turn(forward: false)
             } else if x > 1 - edge {
@@ -212,7 +236,7 @@ struct PagerView: UIViewControllerRepresentable {
             }
         }
 
-        private func turn(forward: Bool) {
+        func turn(forward: Bool) {
             guard !animating, !model.counts.isEmpty, let pager,
                   let current = pager.viewControllers?.first as? PageVC, current.index >= 0 else { return }
             let step = spread ? 2 : 1

@@ -25,6 +25,16 @@ struct Bookmark: Codable, Identifiable, Hashable {
     var date = Date()
 }
 
+struct Highlight: Codable, Identifiable, Hashable {
+    var id = UUID()
+    var chapter: Int
+    var start: Int
+    var length: Int
+    var text: String
+    var note: String?
+    var date = Date()
+}
+
 struct TOCEntry: Codable, Identifiable, Hashable {
     var id = UUID()
     var title: String
@@ -47,6 +57,10 @@ struct Book: Codable, Identifiable, Hashable {
     // Später ergänzte Felder sind optional, damit alte Bibliotheken lesbar bleiben.
     var toc: [TOCEntry]?
     var customCover: String?
+    var highlights: [Highlight]?
+    var rating: Int?
+    var review: String?
+    var finishedAt: Date?
 
     var finished: Bool { progress >= 0.98 }
     var started: Bool { progress > 0.01 && !finished }
@@ -181,6 +195,9 @@ final class Library: ObservableObject {
             $0.chapter = chapter
             $0.fraction = fraction
             $0.progress = progress
+            if $0.finished && $0.finishedAt == nil {
+                $0.finishedAt = Date()
+            }
         }
     }
 
@@ -192,6 +209,15 @@ final class Library: ObservableObject {
                 $0.fraction = 0
             }
         }
+    }
+
+    func setRating(_ id: UUID, _ rating: Int) {
+        mutate(id) { $0.rating = $0.rating == rating ? nil : rating }
+    }
+
+    func setReview(_ id: UUID, _ review: String) {
+        let trimmed = review.trimmingCharacters(in: .whitespacesAndNewlines)
+        mutate(id) { $0.review = trimmed.isEmpty ? nil : trimmed }
     }
 
     /// Liest das Inhaltsverzeichnis nach, falls das Buch vor dieser Funktion importiert wurde.
@@ -249,6 +275,28 @@ final class Library: ObservableObject {
 
     func removeBookmark(_ id: UUID, _ bookmarkID: UUID) {
         mutate(id) { $0.bookmarks.removeAll { $0.id == bookmarkID } }
+    }
+
+    // MARK: Markierungen
+
+    func addHighlight(_ id: UUID, _ highlight: Highlight) {
+        mutate(id) {
+            var list = $0.highlights ?? []
+            list.append(highlight)
+            $0.highlights = list
+        }
+    }
+
+    func removeHighlight(_ id: UUID, _ highlightID: UUID) {
+        mutate(id) { $0.highlights?.removeAll { $0.id == highlightID } }
+    }
+
+    func setNote(_ id: UUID, highlightID: UUID, note: String) {
+        let trimmed = note.trimmingCharacters(in: .whitespacesAndNewlines)
+        mutate(id) { book in
+            guard let index = book.highlights?.firstIndex(where: { $0.id == highlightID }) else { return }
+            book.highlights?[index].note = trimmed.isEmpty ? nil : trimmed
+        }
     }
 
     // MARK: Regale

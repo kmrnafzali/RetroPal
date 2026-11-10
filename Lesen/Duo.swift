@@ -109,6 +109,20 @@ private struct CoverBridge: ViewModifier {
     }
 }
 
+enum DuoFold {
+    /// Lage des Falzes, solange das Duo halb aufgeklappt ist. Sonst nil.
+    static func division(_ proxy: GeometryProxy) -> CGRect? {
+        #if DUO_FOLD
+        if #available(iOS 27.1, *) {
+            return proxy.reservedRegions(kind: .division).first?.frame
+        }
+        return nil
+        #else
+        return nil
+        #endif
+    }
+}
+
 enum DuoFeatures {
     /// Ob diese Version der App die Außendisplay-Funktion überhaupt enthält.
     static var coverCompiled: Bool {

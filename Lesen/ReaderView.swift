@@ -29,6 +29,10 @@ struct ReaderView: View {
     @State private var isSpread = false
     @State private var hingeDegrees: Double?
     @State private var coverAvailable = false
+    @State private var lookupTerm: LookupTerm?
+    @State private var noteTarget: UUID?
+    @State private var noteText = ""
+    @State private var showNote = false
 
     private let ticker = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
 
@@ -50,6 +54,8 @@ struct ReaderView: View {
             theme: choice.resolve(systemDark: systemDark)
         )
         initial.toc = book.toc ?? []
+        initial.bookmarks = book.bookmarks
+        initial.highlights = book.highlights ?? []
         _model = StateObject(wrappedValue: initial)
     }
 
@@ -65,7 +71,7 @@ struct ReaderView: View {
         switch choice {
         case .auto: return nil
         case .dark: return .dark
-        case .paper, .sepia: return .light
+        case .paper, .sepia, .candle: return .light
         }
     }
 
@@ -79,12 +85,24 @@ struct ReaderView: View {
             theme.swiftUIBackground.ignoresSafeArea()
 
             GeometryReader { geo in
-                let spread = geo.size.width >= 560
-                PagerView(model: model, spread: spread)
-                    .id(spread)
-                    .frame(width: geo.size.width, height: geo.size.height)
-                    .onAppear { configure(geo.size) }
-                    .onChange(of: geo.size) { _, newSize in configure(newSize) }
+                let fold = DuoFold.division(geo)
+                if let fold, fold.width > fold.height, fold.minY > 160 {
+                    // Tisch-Modus: Seite oben, Steuerung unter dem Falz
+                    VStack(spacing: 0) {
+                        pager(size: CGSize(width: geo.size.width, height: fold.minY))
+                        Color.clear.frame(height: fold.height)
+                        TabletopPanel(model: model, title: bookTitle, pageLabel: pageLabel,
+                                      onClose: close, onSettings: { showSettings = true },
+                                      onContents: { showContents = true })
+                            .frame(height: max(0, geo.size.height - fold.maxY))
+                    }
+                } else {
+                    pager(size: geo.size)
+                }
+            }
+
+            if theme == .candle {
+                CandleGlow()
             }
 
             hingeCover
@@ -92,13 +110,21 @@ struct ReaderView: View {
             if model.isPaginating {
                 loadingOverlay
             }
-            if model.chrome && !model.isPaginating {
+            if model.chrome && !model.isPaginating && model.selection == nil {
                 chromeOverlay
+            }
+            if let selection = model.selection {
+                VStack {
+                    Spacer()
+                    selectionCard(selection)
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
         .preferredColorScheme(forcedScheme)
         .statusBarHidden(!model.chrome)
-        .animation(.easeInOut(duration: 0.22), value: model.chrome)
+        .animation(.spring(response: 0.32, dampingFraction: 0.86), value: model.chrome)
+        .animation(.spring(response: 0.32, dampingFraction: 0.86), value: model.selection)
         .animation(.easeInOut(duration: 0.25), value: model.isPaginating)
         .onChange(of: fontSize) { _, _ in configure(lastSize) }
         .onChange(of: fontRaw) { _, _ in configure(lastSize) }
@@ -113,16 +139,7 @@ struct ReaderView: View {
                 library.addReading(seconds: 5)
             }
         }
-        .onAppear {
-            let id = bookID
-            model.onPosition = { chapter, fraction, progress in
-                library.updatePosition(id, chapter: chapter, fraction: fraction, progress: progress)
-            }
-            model.setTheme(theme)
-            library.markOpened(id)
-            library.ensureTOC(id)
-            model.toc = library.book(id)?.toc ?? []
-        }
+        .onAppear(perform: start)
         .onDisappear {
             library.flushStats()
         }
@@ -137,8 +154,54 @@ struct ReaderView: View {
                 .presentationDetents([.medium, .large])
         }
         .sheet(isPresented: $showContents) {
-            ContentsView(bookID: bookID, model: model)
+            ContentsView(bookID: bookID, model: model, onChange: syncDecor)
         }
+        .sheet(item: $lookupTerm) { term in
+            DictionaryView(term: term.text)
+                .presentationDetents([.medium, .large])
+        }
+        .alert("Notiz", isPresented: $showNote) {
+            TextField("Dein Gedanke dazu", text: $noteText)
+            Button("Sichern") {
+                if let target = noteTarget {
+                    library.setNote(bookID, highlightID: target, note: noteText)
+                    syncDecor()
+                }
+            }
+            Button("Abbrechen", role: .cancel) {}
+        }
+    }
+
+    private func pager(size: CGSize) -> some View {
+        let spread = size.width >= 560
+        return PagerView(model: model, spread: spread)
+            .id(spread)
+            .frame(width: size.width, height: size.height)
+            .onAppear { configure(size) }
+            .onChange(of: size) { _, newSize in configure(newSize) }
+    }
+
+    private func start() {
+        let id = bookID
+        model.onPosition = { chapter, fraction, progress in
+            library.updatePosition(id, chapter: chapter, fraction: fraction, progress: progress)
+        }
+        model.onToggleBookmark = { index in
+            toggleBookmark(at: index)
+        }
+        model.setTheme(theme)
+        library.markOpened(id)
+        library.ensureTOC(id)
+        model.toc = library.book(id)?.toc ?? []
+        syncDecor()
+    }
+
+    /// Lesezeichen und Markierungen aus der Bibliothek in die Seiten übernehmen.
+    private func syncDecor() {
+        guard let book = library.book(bookID) else { return }
+        model.bookmarks = book.bookmarks
+        model.highlights = book.highlights ?? []
+        model.refreshDecor()
     }
 
     // MARK: Layout
@@ -158,7 +221,7 @@ struct ReaderView: View {
             fontSize: fontSize,
             font: ReadingFont(rawValue: fontRaw) ?? .iowan,
             lineHeight: lineHeight,
-            margin: pageMargin + (spread ? 6 : 0)
+            margin: pageMargin + (spread ? 8 : 0)
         ))
     }
 
@@ -193,9 +256,9 @@ struct ReaderView: View {
                 .frame(width: 96, height: 144)
             ProgressView(value: model.progressValue)
                 .frame(width: 170)
-                .tint(Color.primary.opacity(0.6))
-            Text("Seiten werden gesetzt …")
-                .font(.footnote)
+                .tint(Wood.brass)
+            Text("Das Buch wird gesetzt …")
+                .font(.system(.footnote, design: .serif))
                 .foregroundStyle(.secondary)
         }
         .padding(28)
@@ -215,31 +278,31 @@ struct ReaderView: View {
 
     private var chromeOverlay: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 18) {
-                Button { close() } label: { Image(systemName: "chevron.down") }
-                VStack(spacing: 1) {
+            HStack(spacing: 6) {
+                chromeButton("chevron.down", action: close)
+                VStack(spacing: 2) {
                     Text(bookTitle)
                         .font(.system(.subheadline, design: .serif).weight(.semibold))
                         .lineLimit(1)
                     if !model.currentTitle.isEmpty {
-                        Text(model.currentTitle)
-                            .font(.caption2)
+                        Text(model.currentTitle.uppercased())
+                            .font(.system(size: 10, weight: .medium))
+                            .tracking(1)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
                 }
                 .frame(maxWidth: .infinity)
-                Button { toggleBookmark() } label: {
-                    Image(systemName: isBookmarked ? "bookmark.fill" : "bookmark")
-                        .contentTransition(.symbolEffect(.replace))
+                chromeButton(isBookmarked ? "bookmark.fill" : "bookmark") {
+                    toggleBookmark(at: model.index)
                 }
-                Button { showContents = true } label: { Image(systemName: "list.bullet") }
-                Button { showSettings = true } label: { Image(systemName: "textformat.size") }
+                chromeButton("list.bullet") { showContents = true }
+                chromeButton("textformat.size") { showSettings = true }
             }
-            .font(.title3)
-            .padding(.horizontal, 18)
-            .padding(.vertical, 12)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
             .background(.ultraThinMaterial)
+            .overlay(alignment: .bottom) { Rectangle().fill(Color.primary.opacity(0.08)).frame(height: 0.5) }
             .transition(.move(edge: .top).combined(with: .opacity))
 
             Spacer()
@@ -249,21 +312,135 @@ struct ReaderView: View {
                     scrubbing = editing
                     if !editing { model.jump(toGlobalFraction: sliderValue) }
                 }
+                .tint(Wood.brass)
                 HStack {
                     Text(pageLabel)
                     Spacer()
                     Text("\(Int((model.progress * 100).rounded())) %")
                 }
-                .font(.caption)
+                .font(.system(.caption, design: .serif))
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
             }
             .padding(.horizontal, 22)
             .padding(.vertical, 12)
             .background(.ultraThinMaterial)
+            .overlay(alignment: .top) { Rectangle().fill(Color.primary.opacity(0.08)).frame(height: 0.5) }
             .transition(.move(edge: .bottom).combined(with: .opacity))
         }
+    }
+
+    private func chromeButton(_ symbol: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 18, weight: .medium))
+                .frame(width: 42, height: 42)
+                .contentShape(Rectangle())
+        }
         .tint(Color.primary)
+    }
+
+    // MARK: Auswahl
+
+    private func selectionCard(_ selection: TextSelection) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(selection.wordText)
+                    .font(.system(.title3, design: .serif).weight(.semibold))
+                Spacer()
+                Button {
+                    model.select(nil)
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Text(selection.sentenceText)
+                .font(.system(.footnote, design: .serif))
+                .italic()
+                .foregroundStyle(.secondary)
+                .lineLimit(3)
+
+            HStack(spacing: 10) {
+                actionButton("Nachschlagen", "character.book.closed") {
+                    lookupTerm = LookupTerm(text: selection.wordText)
+                }
+                if let existing = selection.highlightID {
+                    actionButton("Notiz", "square.and.pencil") {
+                        beginNote(for: existing)
+                    }
+                    actionButton("Entfernen", "highlighter") {
+                        library.removeHighlight(bookID, existing)
+                        syncDecor()
+                        model.select(nil)
+                    }
+                } else {
+                    actionButton("Markieren", "highlighter") {
+                        _ = addHighlight(selection)
+                        model.select(nil)
+                    }
+                    actionButton("Notiz", "square.and.pencil") {
+                        let id = addHighlight(selection)
+                        beginNote(for: id)
+                    }
+                }
+                ShareLink(item: "„\(selection.sentenceText)“\n— \(bookTitle)") {
+                    actionLabel("Teilen", "square.and.arrow.up")
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(18)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).stroke(Color.primary.opacity(0.08), lineWidth: 1))
+        .shadow(color: .black.opacity(0.2), radius: 18, y: 6)
+        .padding(.horizontal, 14)
+        .padding(.bottom, 10)
+        .frame(maxWidth: 520)
+    }
+
+    private func actionLabel(_ title: String, _ symbol: String) -> some View {
+        VStack(spacing: 5) {
+            Image(systemName: symbol)
+                .font(.system(size: 17, weight: .medium))
+            Text(title)
+                .font(.system(size: 11, weight: .medium))
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 10)
+        .background(Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private func actionButton(_ title: String, _ symbol: String, action: @escaping () -> Void) -> some View {
+        Button {
+            Haptics.tap()
+            action()
+        } label: {
+            actionLabel(title, symbol)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func addHighlight(_ selection: TextSelection) -> UUID {
+        let highlight = Highlight(
+            chapter: selection.chapter,
+            start: selection.sentence.location,
+            length: selection.sentence.length,
+            text: selection.sentenceText
+        )
+        library.addHighlight(bookID, highlight)
+        syncDecor()
+        return highlight.id
+    }
+
+    private func beginNote(for highlightID: UUID) {
+        noteTarget = highlightID
+        noteText = library.book(bookID)?.highlights?.first(where: { $0.id == highlightID })?.note ?? ""
+        model.select(nil)
+        showNote = true
     }
 
     private func close() {
@@ -273,34 +450,43 @@ struct ReaderView: View {
 
     // MARK: Lesezeichen
 
-    private func pageRange() -> (Double, Double)? {
-        guard model.chapter < model.counts.count else { return nil }
-        let count = Double(max(1, model.counts[model.chapter]))
-        return (Double(model.page) / count, Double(model.page + 1) / count)
-    }
-
-    private func bookmarkOnPage() -> Bookmark? {
-        guard let range = pageRange(), let book = library.book(bookID) else { return nil }
-        return book.bookmarks.first {
-            $0.chapter == model.chapter && $0.fraction >= range.0 - 0.0001 && $0.fraction < range.1 - 0.0001
-        }
-    }
-
     private var isBookmarked: Bool {
-        bookmarkOnPage() != nil
+        guard let location = model.locate(model.index) else { return false }
+        return model.bookmark(chapter: location.chapter, page: location.page) != nil
     }
 
-    private func toggleBookmark() {
-        guard let range = pageRange() else { return }
+    private func toggleBookmark(at index: Int) {
+        guard let location = model.locate(index) else { return }
         Haptics.tap()
-        if let existing = bookmarkOnPage() {
+        if let existing = model.bookmark(chapter: location.chapter, page: location.page) {
             library.removeBookmark(bookID, existing.id)
         } else {
-            let chapterTitle = model.currentTitle
-            let label = chapterTitle.isEmpty ? "Seite \(model.index + 1)" : "\(chapterTitle) · Seite \(model.index + 1)"
-            library.addBookmark(bookID, Bookmark(chapter: model.chapter, fraction: range.0, label: label))
+            let chapterTitle = model.title(forChapter: location.chapter)
+            let label = chapterTitle.isEmpty ? "Seite \(index + 1)" : "\(chapterTitle) · Seite \(index + 1)"
+            library.addBookmark(bookID, Bookmark(
+                chapter: location.chapter,
+                fraction: model.fraction(chapter: location.chapter, page: location.page),
+                label: label
+            ))
         }
+        syncDecor()
     }
+}
+
+struct LookupTerm: Identifiable {
+    let id = UUID()
+    let text: String
+}
+
+/// Das eingebaute iOS-Wörterbuch (funktioniert offline, sobald ein Wörterbuch geladen ist).
+struct DictionaryView: UIViewControllerRepresentable {
+    let term: String
+
+    func makeUIViewController(context: Context) -> UIReferenceLibraryViewController {
+        UIReferenceLibraryViewController(term: term)
+    }
+
+    func updateUIViewController(_ controller: UIReferenceLibraryViewController, context: Context) {}
 }
 
 /// Innenseite des Buchdeckels für den Scharnier-Effekt.
@@ -312,6 +498,91 @@ private struct CoverBack: View {
             theme.swiftUIBackground
             LinearGradient(colors: [.clear, .black.opacity(0.18)], startPoint: .leading, endPoint: .trailing)
         }
+    }
+}
+
+/// Warmer Lichtkegel mit dunklen Rändern für das Kerzenlicht-Thema.
+private struct CandleGlow: View {
+    @State private var flicker = false
+
+    var body: some View {
+        RadialGradient(
+            colors: [.clear, Color(red: 0.25, green: 0.12, blue: 0.02).opacity(flicker ? 0.50 : 0.42)],
+            center: .center,
+            startRadius: 120,
+            endRadius: 620
+        )
+        .ignoresSafeArea()
+        .allowsHitTesting(false)
+        .onAppear {
+            withAnimation(.easeInOut(duration: 2.4).repeatForever(autoreverses: true)) {
+                flicker = true
+            }
+        }
+    }
+}
+
+/// Steuerung unter dem Falz, wenn das Duo halb aufgeklappt auf dem Tisch steht.
+private struct TabletopPanel: View {
+    @ObservedObject var model: ReaderModel
+    let title: String
+    let pageLabel: String
+    let onClose: () -> Void
+    let onSettings: () -> Void
+    let onContents: () -> Void
+
+    var body: some View {
+        VStack(spacing: 16) {
+            VStack(spacing: 3) {
+                Text(title)
+                    .font(.system(.headline, design: .serif))
+                    .lineLimit(1)
+                Text(model.currentTitle.isEmpty ? pageLabel : "\(model.currentTitle) · \(pageLabel)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            ProgressView(value: model.progress)
+                .tint(Wood.brass)
+                .padding(.horizontal, 30)
+
+            HStack(spacing: 14) {
+                turnButton("chevron.left", forward: false)
+                VStack(spacing: 10) {
+                    HStack(spacing: 10) {
+                        smallButton("chevron.down", action: onClose)
+                        smallButton("list.bullet", action: onContents)
+                        smallButton("textformat.size", action: onSettings)
+                    }
+                }
+                turnButton("chevron.right", forward: true)
+            }
+            .padding(.horizontal, 20)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.regularMaterial)
+    }
+
+    private func turnButton(_ symbol: String, forward: Bool) -> some View {
+        Button {
+            model.turnHandler?(forward)
+        } label: {
+            Image(systemName: symbol)
+                .font(.system(size: 26, weight: .semibold))
+                .frame(maxWidth: .infinity, minHeight: 74)
+                .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func smallButton(_ symbol: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 17, weight: .medium))
+                .frame(width: 48, height: 48)
+                .background(Color.primary.opacity(0.08), in: Circle())
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -333,8 +604,8 @@ struct ReaderSettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Darstellung") {
-                    HStack(spacing: 14) {
+                Section("Papier") {
+                    HStack(spacing: 8) {
                         ForEach(ThemeChoice.allCases) { item in
                             Button {
                                 Haptics.tap()
@@ -342,12 +613,12 @@ struct ReaderSettingsView: View {
                             } label: {
                                 VStack(spacing: 6) {
                                     swatch(item)
-                                        .frame(width: 44, height: 44)
+                                        .frame(width: 42, height: 42)
                                         .overlay(
-                                            Circle().stroke(themeRaw == item.rawValue ? Color.accentColor : Color.gray.opacity(0.35),
+                                            Circle().stroke(themeRaw == item.rawValue ? Wood.brass : Color.gray.opacity(0.35),
                                                             lineWidth: themeRaw == item.rawValue ? 3 : 1)
                                         )
-                                    Text(item.title).font(.caption)
+                                    Text(item.title).font(.caption2)
                                 }
                                 .frame(maxWidth: .infinity)
                             }
@@ -380,11 +651,15 @@ struct ReaderSettingsView: View {
                     .pickerStyle(.segmented)
                 }
 
-                Section("Gefühl") {
+                Section {
                     Toggle("Umblättergeräusch", isOn: $pageSound)
                     if DuoFeatures.hingeCompiled {
                         Toggle("Buchdeckel folgt dem Scharnier", isOn: $hingeEffect)
                     }
+                } header: {
+                    Text("Gefühl")
+                } footer: {
+                    Text("Tippe auf die obere Seitenecke für ein Eselsohr. Halte ein Wort gedrückt, um es nachzuschlagen oder den Satz zu markieren.")
                 }
 
                 if DuoFeatures.coverCompiled {
@@ -422,27 +697,39 @@ struct ReaderSettingsView: View {
             Circle().fill(ReadingTheme.paper.swiftUIBackground)
         case .sepia:
             Circle().fill(ReadingTheme.sepia.swiftUIBackground)
+        case .candle:
+            Circle().fill(
+                RadialGradient(colors: [ReadingTheme.candle.swiftUIBackground, Color(red: 0.55, green: 0.36, blue: 0.15)],
+                               center: .center, startRadius: 4, endRadius: 26)
+            )
         case .dark:
             Circle().fill(ReadingTheme.dark.swiftUIBackground)
         }
     }
 }
 
-// MARK: - Inhalt und Lesezeichen
+// MARK: - Inhalt, Lesezeichen, Markierungen
 
 struct ContentsView: View {
     @EnvironmentObject private var library: Library
     @Environment(\.dismiss) private var dismiss
     let bookID: UUID
     @ObservedObject var model: ReaderModel
+    let onChange: () -> Void
     @State private var tab = 0
 
     private var bookmarks: [Bookmark] {
         library.book(bookID)?.bookmarks ?? []
     }
 
+    private var highlights: [Highlight] {
+        (library.book(bookID)?.highlights ?? []).sorted {
+            ($0.chapter, $0.start) < ($1.chapter, $1.start)
+        }
+    }
+
     private var currentEntry: TOCEntry? {
-        model.toc.last { $0.chapter <= model.chapter }
+        model.toc.last(where: { $0.chapter <= model.chapter })
     }
 
     var body: some View {
@@ -451,18 +738,19 @@ struct ContentsView: View {
                 Picker("", selection: $tab) {
                     Text("Inhalt").tag(0)
                     Text("Lesezeichen").tag(1)
+                    Text("Markierungen").tag(2)
                 }
                 .pickerStyle(.segmented)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
 
-                if tab == 0 {
-                    contents
-                } else {
-                    bookmarkList
+                switch tab {
+                case 0: contents
+                case 1: bookmarkList
+                default: highlightList
                 }
             }
-            .navigationTitle(tab == 0 ? "Inhalt" : "Lesezeichen")
+            .navigationTitle(tab == 0 ? "Inhalt" : (tab == 1 ? "Lesezeichen" : "Markierungen"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
@@ -488,7 +776,7 @@ struct ContentsView: View {
                             if entry.id == currentEntry?.id {
                                 Image(systemName: "book.fill")
                                     .font(.footnote)
-                                    .foregroundStyle(.tint)
+                                    .foregroundStyle(Wood.brass)
                             }
                         }
                     }
@@ -531,13 +819,65 @@ struct ContentsView: View {
             .onDelete { offsets in
                 let ids = offsets.map { bookmarks[$0].id }
                 for id in ids { library.removeBookmark(bookID, id) }
+                onChange()
             }
         }
         .listStyle(.plain)
         .overlay {
             if bookmarks.isEmpty {
                 ContentUnavailableView("Keine Lesezeichen", systemImage: "bookmark",
-                                       description: Text("Tippe oben auf das Lesezeichen, um die aktuelle Seite zu merken."))
+                                       description: Text("Tippe auf die obere Seitenecke, um ein Eselsohr zu knicken."))
+            }
+        }
+    }
+
+    private var highlightList: some View {
+        List {
+            ForEach(highlights) { highlight in
+                Button {
+                    model.jump(chapter: highlight.chapter,
+                               fraction: model.fraction(chapter: highlight.chapter, offset: highlight.start))
+                    dismiss()
+                } label: {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(highlight.text)
+                            .font(.system(.callout, design: .serif))
+                            .italic()
+                            .lineLimit(5)
+                            .padding(.leading, 10)
+                            .overlay(alignment: .leading) {
+                                RoundedRectangle(cornerRadius: 2)
+                                    .fill(Color(red: 0.95, green: 0.76, blue: 0.22))
+                                    .frame(width: 3)
+                            }
+                        if let note = highlight.note {
+                            Label(note, systemImage: "square.and.pencil")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                        let chapterTitle = model.title(forChapter: highlight.chapter)
+                        if !chapterTitle.isEmpty {
+                            Text(chapterTitle.uppercased())
+                                .font(.system(size: 10, weight: .medium))
+                                .tracking(1)
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+                .foregroundStyle(.primary)
+            }
+            .onDelete { offsets in
+                let ids = offsets.map { highlights[$0].id }
+                for id in ids { library.removeHighlight(bookID, id) }
+                onChange()
+            }
+        }
+        .listStyle(.plain)
+        .overlay {
+            if highlights.isEmpty {
+                ContentUnavailableView("Keine Markierungen", systemImage: "highlighter",
+                                       description: Text("Halte ein Wort gedrückt und wähle „Markieren“, um den Satz anzustreichen."))
             }
         }
     }

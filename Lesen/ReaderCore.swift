@@ -1,8 +1,7 @@
 import SwiftUI
 import UIKit
-import WebKit
 
-/// Geometrie und Schrift einer Buchseite. Davon hängt die Seitenzahl ab.
+/// Geometrie und Schrift einer Buchseite. Davon hängt die Seitenaufteilung ab.
 struct PageLayout: Equatable {
     /// Breite einer einzelnen Buchseite (im Doppelseiten-Modus die halbe Bildschirmbreite).
     var pageWidth: Int
@@ -14,9 +13,17 @@ struct PageLayout: Equatable {
     var lineHeight: Double
     var margin: Int
 
-    var topPad: Int { 24 }
-    var bottomPad: Int { 46 }
+    var topPad: Int { 26 }
+    var bottomPad: Int { 44 }
     var size: CGSize { CGSize(width: pageWidth, height: height) }
+
+    var contentSize: CGSize {
+        CGSize(width: max(80, pageWidth - 2 * margin), height: max(120, height - topPad - bottomPad))
+    }
+
+    var cacheKey: String {
+        "\(pageWidth)x\(height)-\(font.rawValue)-\(fontSize)-\(Int(lineHeight * 100))-\(margin)"
+    }
 }
 
 enum PageSide {
@@ -32,92 +39,188 @@ struct PageInfo {
     var title: String
 }
 
-enum ReaderJS {
-    static func viewportScript(width: Int) -> WKUserScript {
-        let source = """
-        (function () {
-          try {
-            var NS = 'http://www.w3.org/1999/xhtml';
-            var m = document.createElementNS(NS, 'meta');
-            m.setAttribute('name', 'viewport');
-            m.setAttribute('content', 'width=\(width), initial-scale=1, maximum-scale=1, user-scalable=no');
-            (document.head || document.documentElement).appendChild(m);
-          } catch (e) {}
-        })();
-        """
-        return WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+/// Vom Leser angetippte Textstelle.
+struct TextSelection: Equatable {
+    var chapter: Int
+    var word: NSRange
+    var sentence: NSRange
+    var wordText: String
+    var sentenceText: String
+    var highlightID: UUID?
+}
+
+// MARK: - Zeichenfläche einer Seite
+
+final class PageCanvas: UIView {
+    var chapterLayout: ChapterLayout?
+    var page = 0
+    var textOrigin = CGPoint.zero
+    var theme: ReadingTheme = .paper
+    var side: PageSide = .single
+    var margin: CGFloat = 24
+    var footerTitle = ""
+    var footerNumber = ""
+    var highlights: [NSRange] = []
+    var selection: NSRange?
+    var dogEar = false
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isOpaque = true
+        contentMode = .redraw
     }
 
-    static func css(layout: PageLayout, theme: ReadingTheme) -> String {
-        let w = layout.pageWidth
-        let h = layout.height
-        let pad = layout.margin
-        let colW = w - 2 * pad
-        let imgH = h - layout.topPad - layout.bottomPad - 8
-        let lineHeight = String(format: "%.2f", layout.lineHeight)
-        return """
-        html { width: \(w)px !important; height: \(h)px !important; overflow: hidden !important; margin: 0 !important; padding: 0 !important; background: \(theme.backgroundHex) !important; -webkit-text-size-adjust: 100% !important; }
-        body { box-sizing: border-box !important; margin: 0 !important; width: \(w)px !important; height: \(h)px !important; padding: \(layout.topPad)px \(pad)px \(layout.bottomPad)px \(pad)px !important; -webkit-column-width: \(colW)px !important; column-width: \(colW)px !important; -webkit-column-gap: \(2 * pad)px !important; column-gap: \(2 * pad)px !important; column-fill: auto !important; background: \(theme.backgroundHex) !important; color: \(theme.textHex) !important; font-family: \(layout.font.css) !important; font-size: \(layout.fontSize)px !important; line-height: \(lineHeight) !important; text-align: justify !important; -webkit-hyphens: auto !important; hyphens: auto !important; -webkit-user-select: none !important; user-select: none !important; -webkit-touch-callout: none !important; -webkit-tap-highlight-color: transparent !important; text-rendering: optimizeLegibility !important; -webkit-font-smoothing: antialiased !important; font-variant-ligatures: common-ligatures !important; font-feature-settings: 'kern' 1, 'liga' 1, 'onum' 1 !important; orphans: 2 !important; widows: 2 !important; }
-        body * { color: inherit !important; background-color: transparent !important; font-family: inherit !important; max-width: 100% !important; box-sizing: border-box !important; line-height: inherit !important; }
-        h1, h2, h3, h4, h5, h6 { text-align: left !important; break-after: avoid !important; -webkit-column-break-after: avoid !important; line-height: 1.25 !important; letter-spacing: 0.01em !important; -webkit-hyphens: none !important; hyphens: none !important; }
-        img { max-width: \(colW)px !important; max-height: \(imgH)px !important; width: auto !important; height: auto !important; object-fit: contain !important; break-inside: avoid !important; }
-        svg { width: \(colW)px !important; height: \(imgH)px !important; max-height: \(imgH)px !important; break-inside: avoid !important; }
-        a { text-decoration: none !important; }
-        """
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) wird nicht verwendet")
     }
 
-    /// Wird nach dem Laden einer Datei ausgeführt. Gibt die Seitenzahl zurück.
-    static let body = """
-    var NS = 'http://www.w3.org/1999/xhtml';
-    var st = document.createElementNS(NS, 'style');
-    st.textContent = css;
-    (document.head || document.documentElement).appendChild(st);
-    if (!document.documentElement.getAttribute('lang')) {
-      document.documentElement.setAttribute('lang', 'de');
-    }
-    try { await document.fonts.ready; } catch (e) {}
-    var imgs = Array.prototype.slice.call(document.images || []);
-    await Promise.all(imgs.map(function (i) {
-      return i.complete ? Promise.resolve() : new Promise(function (r) { i.onload = r; i.onerror = r; });
-    }));
-    await new Promise(function (r) { setTimeout(r, 40); });
-    var sw = document.documentElement.scrollWidth;
-    if (document.body) { sw = Math.max(sw, document.body.scrollWidth); }
-    var pages = Math.max(1, Math.ceil((sw - 3) / W));
-    window.scrollTo(page * W, 0);
-    document.documentElement.scrollLeft = page * W;
-    return pages;
-    """
+    override func draw(_ rect: CGRect) {
+        guard let context = UIGraphicsGetCurrentContext() else { return }
+        let bounds = self.bounds
+        theme.background.setFill()
+        context.fill(bounds)
 
-    static func arguments(layout: PageLayout, theme: ReadingTheme, page: Int) -> [String: Any] {
-        ["css": css(layout: layout, theme: theme), "W": layout.pageWidth, "page": page]
+        if let chapterLayout {
+            // Markierungen liegen unter dem Text
+            let marker = theme.isDark
+                ? UIColor(red: 0.85, green: 0.68, blue: 0.20, alpha: 0.38)
+                : UIColor(red: 0.98, green: 0.80, blue: 0.25, alpha: 0.48)
+            marker.setFill()
+            for range in highlights {
+                for box in chapterLayout.rects(for: range, page: page) {
+                    let shifted = box.offsetBy(dx: textOrigin.x, dy: textOrigin.y).insetBy(dx: -1.5, dy: 0)
+                    UIBezierPath(roundedRect: shifted, cornerRadius: 3).fill()
+                }
+            }
+            if let selection {
+                UIColor(red: 0.30, green: 0.50, blue: 0.85, alpha: 0.28).setFill()
+                for box in chapterLayout.rects(for: selection, page: page) {
+                    let shifted = box.offsetBy(dx: textOrigin.x, dy: textOrigin.y).insetBy(dx: -1.5, dy: 0)
+                    UIBezierPath(roundedRect: shifted, cornerRadius: 3).fill()
+                }
+            }
+            chapterLayout.draw(page: page, at: textOrigin)
+        }
+
+        drawFooter(in: bounds)
+        if side != .single {
+            drawSpineShadow(in: bounds, context: context)
+        }
+        if dogEar {
+            drawDogEar(in: bounds, context: context)
+        }
+    }
+
+    private func drawFooter(in bounds: CGRect) {
+        guard !footerNumber.isEmpty else { return }
+        let color = theme.footerColor
+        let numberAttributes: [NSAttributedString.Key: Any] = [
+            .font: UIFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium),
+            .foregroundColor: color
+        ]
+        let titleStyle = NSMutableParagraphStyle()
+        titleStyle.lineBreakMode = .byTruncatingTail
+        titleStyle.alignment = side == .left ? .right : .left
+        let titleAttributes: [NSAttributedString.Key: Any] = [
+            .font: UIFont.systemFont(ofSize: 10.5, weight: .medium),
+            .foregroundColor: color,
+            .kern: 0.6,
+            .paragraphStyle: titleStyle
+        ]
+        let y = bounds.height - 29
+        let number = footerNumber as NSString
+        let numberSize = number.size(withAttributes: numberAttributes)
+        let titleWidth = max(0, bounds.width - 2 * margin - numberSize.width - 12)
+        if side == .left {
+            number.draw(at: CGPoint(x: margin, y: y), withAttributes: numberAttributes)
+            (footerTitle as NSString).draw(
+                in: CGRect(x: margin + numberSize.width + 12, y: y, width: titleWidth, height: 16),
+                withAttributes: titleAttributes
+            )
+        } else {
+            number.draw(at: CGPoint(x: bounds.width - margin - numberSize.width, y: y), withAttributes: numberAttributes)
+            (footerTitle as NSString).draw(
+                in: CGRect(x: margin, y: y, width: titleWidth, height: 16),
+                withAttributes: titleAttributes
+            )
+        }
+    }
+
+    /// Schatten am Buchfalz, damit die Doppelseite wie ein aufgeschlagenes Buch wirkt.
+    private func drawSpineShadow(in bounds: CGRect, context: CGContext) {
+        let strength: CGFloat = theme.isDark ? 0.55 : 0.16
+        let colors = [
+            UIColor.black.withAlphaComponent(0).cgColor,
+            UIColor.black.withAlphaComponent(strength * 0.3).cgColor,
+            UIColor.black.withAlphaComponent(strength).cgColor
+        ] as CFArray
+        guard let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0, 0.65, 1]) else { return }
+        let width: CGFloat = 38
+        context.saveGState()
+        if side == .left {
+            context.clip(to: CGRect(x: bounds.width - width, y: 0, width: width, height: bounds.height))
+            context.drawLinearGradient(gradient, start: CGPoint(x: bounds.width - width, y: 0),
+                                       end: CGPoint(x: bounds.width, y: 0), options: [])
+        } else {
+            context.clip(to: CGRect(x: 0, y: 0, width: width, height: bounds.height))
+            context.drawLinearGradient(gradient, start: CGPoint(x: width, y: 0), end: CGPoint(x: 0, y: 0), options: [])
+        }
+        context.restoreGState()
+    }
+
+    /// Eselsohr an der äußeren oberen Ecke als Lesezeichen.
+    private func drawDogEar(in bounds: CGRect, context: CGContext) {
+        let size: CGFloat = 34
+        let outerX: CGFloat = side == .left ? 0 : bounds.width
+        let direction: CGFloat = side == .left ? 1 : -1
+
+        // Ecke „wegnehmen"
+        let cut = UIBezierPath()
+        cut.move(to: CGPoint(x: outerX, y: 0))
+        cut.addLine(to: CGPoint(x: outerX + direction * size, y: 0))
+        cut.addLine(to: CGPoint(x: outerX, y: size))
+        cut.close()
+        (theme.isDark ? UIColor.black : UIColor(white: 0.25, alpha: 1)).withAlphaComponent(theme.isDark ? 0.9 : 0.35).setFill()
+        cut.fill()
+
+        // Umgeknickte Rückseite
+        let fold = UIBezierPath()
+        fold.move(to: CGPoint(x: outerX + direction * size, y: 0))
+        fold.addLine(to: CGPoint(x: outerX + direction * size, y: size))
+        fold.addLine(to: CGPoint(x: outerX, y: size))
+        fold.close()
+        context.saveGState()
+        context.setShadow(offset: CGSize(width: direction * 1.5, height: 2), blur: 5,
+                          color: UIColor.black.withAlphaComponent(0.35).cgColor)
+        let paper = theme.background
+        var alpha: CGFloat = 0
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0
+        paper.getRed(&r, green: &g, blue: &b, alpha: &alpha)
+        let shade: CGFloat = theme.isDark ? 1.6 : 0.93
+        UIColor(red: min(1, r * shade + (theme.isDark ? 0.08 : 0)), green: min(1, g * shade + (theme.isDark ? 0.08 : 0)),
+                blue: min(1, b * shade + (theme.isDark ? 0.08 : 0)), alpha: 1).setFill()
+        fold.fill()
+        context.restoreGState()
     }
 }
 
 // MARK: - Einzelne Buchseite
 
-final class PageVC: UIViewController, WKNavigationDelegate {
+final class PageVC: UIViewController {
     /// Fortlaufender Seitenindex über das ganze Buch.
     let index: Int
     let info: PageInfo?
 
-    private let fileURL: URL?
-    private let root: URL
+    private weak var model: ReaderModel?
     private let layout: PageLayout
     private let theme: ReadingTheme
     private let side: PageSide
+    private let canvas = PageCanvas(frame: .zero)
 
-    private var webView: WKWebView?
-    private let titleLabel = UILabel()
-    private let numberLabel = UILabel()
-    private let spineShadow = CAGradientLayer()
-
-    init(index: Int, info: PageInfo?, fileURL: URL?, root: URL, layout: PageLayout,
-         theme: ReadingTheme, side: PageSide) {
+    init(index: Int, info: PageInfo?, model: ReaderModel, layout: PageLayout, theme: ReadingTheme, side: PageSide) {
         self.index = index
         self.info = info
-        self.fileURL = fileURL
-        self.root = root
+        self.model = model
         self.layout = layout
         self.theme = theme
         self.side = side
@@ -128,198 +231,76 @@ final class PageVC: UIViewController, WKNavigationDelegate {
         fatalError("init(coder:) wird nicht verwendet")
     }
 
+    override func loadView() {
+        canvas.theme = theme
+        canvas.side = side
+        canvas.margin = CGFloat(layout.margin)
+        canvas.textOrigin = CGPoint(x: CGFloat(layout.margin), y: CGFloat(layout.topPad))
+        canvas.backgroundColor = theme.background
+        view = canvas
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = theme.background
-        view.clipsToBounds = true
+        guard let info, let model else { return }
+        canvas.chapterLayout = model.engine.chapter(info.chapter)
+        canvas.page = info.page
+        canvas.footerTitle = info.title.uppercased()
+        canvas.footerNumber = "\(info.number)"
+        reloadDecor()
 
-        if let info, let fileURL {
-            let controller = WKUserContentController()
-            controller.addUserScript(ReaderJS.viewportScript(width: layout.pageWidth))
-            let config = WKWebViewConfiguration()
-            config.userContentController = controller
-            let web = WKWebView(frame: CGRect(origin: .zero, size: layout.size), configuration: config)
-            web.navigationDelegate = self
-            web.isOpaque = false
-            web.backgroundColor = theme.background
-            web.underPageBackgroundColor = theme.background
-            web.scrollView.backgroundColor = theme.background
-            web.scrollView.isScrollEnabled = false
-            web.scrollView.bounces = false
-            web.scrollView.contentInsetAdjustmentBehavior = .never
-            web.isUserInteractionEnabled = false
-            web.alpha = 0
-            view.addSubview(web)
-            webView = web
-            web.loadFileURL(fileURL, allowingReadAccessTo: root)
-
-            let footerFont = UIFont.systemFont(ofSize: 11, weight: .medium)
-            titleLabel.font = footerFont
-            titleLabel.textColor = theme.footerColor
-            titleLabel.text = info.title.uppercased()
-            titleLabel.lineBreakMode = .byTruncatingTail
-            numberLabel.font = UIFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
-            numberLabel.textColor = theme.footerColor
-            numberLabel.text = "\(info.number)"
-            view.addSubview(titleLabel)
-            view.addSubview(numberLabel)
-        }
-
-        // Schatten am Buchfalz, damit die Doppelseite wie ein aufgeschlagenes Buch wirkt.
-        if side != .single {
-            let strength: CGFloat = theme.isDark ? 0.5 : 0.14
-            spineShadow.colors = [
-                UIColor.black.withAlphaComponent(0).cgColor,
-                UIColor.black.withAlphaComponent(strength * 0.35).cgColor,
-                UIColor.black.withAlphaComponent(strength).cgColor
-            ]
-            spineShadow.locations = [0, 0.7, 1]
-            if side == .left {
-                spineShadow.startPoint = CGPoint(x: 0, y: 0.5)
-                spineShadow.endPoint = CGPoint(x: 1, y: 0.5)
-            } else {
-                spineShadow.startPoint = CGPoint(x: 1, y: 0.5)
-                spineShadow.endPoint = CGPoint(x: 0, y: 0.5)
-            }
-            view.layer.addSublayer(spineShadow)
-        }
+        let press = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:)))
+        press.minimumPressDuration = 0.35
+        canvas.addGestureRecognizer(press)
     }
 
-    override func viewDidLayoutSubviews() {
-        super.viewDidLayoutSubviews()
-        let bounds = view.bounds
-        webView?.frame = CGRect(origin: .zero, size: layout.size)
+    /// Zeichenbereich dieser Seite im Kapiteltext.
+    var characterRange: NSRange? {
+        guard let info, let chapterLayout = canvas.chapterLayout, info.page < chapterLayout.pageCount else { return nil }
+        return chapterLayout.pageRanges[info.page]
+    }
 
-        let margin = CGFloat(layout.margin)
-        let footerY = bounds.height - 30
-        let numberWidth: CGFloat = 50
-        let titleWidth = max(0, bounds.width - 2 * margin - numberWidth - 8)
-        if side == .left {
-            // Linke Seite: Seitenzahl außen links, Kapitel innen.
-            numberLabel.textAlignment = .left
-            titleLabel.textAlignment = .right
-            numberLabel.frame = CGRect(x: margin, y: footerY, width: numberWidth, height: 16)
-            titleLabel.frame = CGRect(x: margin + numberWidth + 8, y: footerY, width: titleWidth, height: 16)
+    /// Markierungen, Auswahl und Eselsohr neu einlesen.
+    func reloadDecor() {
+        guard let info, let model else { return }
+        canvas.highlights = model.highlights.filter { $0.chapter == info.chapter }
+            .map { NSRange(location: $0.start, length: $0.length) }
+        if let selection = model.selection, selection.chapter == info.chapter {
+            canvas.selection = selection.highlightID == nil ? selection.sentence : nil
         } else {
-            numberLabel.textAlignment = .right
-            titleLabel.textAlignment = .left
-            titleLabel.frame = CGRect(x: margin, y: footerY, width: titleWidth, height: 16)
-            numberLabel.frame = CGRect(x: bounds.width - margin - numberWidth, y: footerY, width: numberWidth, height: 16)
+            canvas.selection = nil
         }
-
-        let shadowWidth: CGFloat = 34
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        if side == .left {
-            spineShadow.frame = CGRect(x: bounds.width - shadowWidth, y: 0, width: shadowWidth, height: bounds.height)
-        } else if side == .right {
-            spineShadow.frame = CGRect(x: 0, y: 0, width: shadowWidth, height: bounds.height)
+        if let range = characterRange {
+            canvas.dogEar = model.hasBookmark(chapter: info.chapter, range: range)
         }
-        CATransaction.commit()
+        canvas.setNeedsDisplay()
     }
 
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        let layout = self.layout
-        let theme = self.theme
-        let page = info?.page ?? 0
-        Task { @MainActor in
-            _ = try? await webView.callAsyncJavaScript(
-                ReaderJS.body,
-                arguments: ReaderJS.arguments(layout: layout, theme: theme, page: page),
-                in: nil,
-                contentWorld: .page
-            )
-            UIView.animate(withDuration: 0.12) {
-                webView.alpha = 1
-            }
+    /// Liegt der Punkt in der äußeren oberen Ecke (Eselsohr-Zone)?
+    func isCorner(_ point: CGPoint) -> Bool {
+        guard info != nil, point.y < 76 else { return false }
+        return side == .left ? point.x < 76 : point.x > view.bounds.width - 76
+    }
+
+    @objc private func handleLongPress(_ recognizer: UILongPressGestureRecognizer) {
+        guard recognizer.state == .began, let info, let model,
+              let chapterLayout = canvas.chapterLayout else { return }
+        let location = recognizer.location(in: canvas)
+        let point = CGPoint(x: location.x - canvas.textOrigin.x, y: location.y - canvas.textOrigin.y)
+        guard let index = chapterLayout.characterIndex(at: point, page: info.page),
+              let word = chapterLayout.wordRange(at: index) else { return }
+        let sentence = chapterLayout.sentenceRange(at: index) ?? word
+        let existing = model.highlights.first {
+            $0.chapter == info.chapter && NSLocationInRange(index, NSRange(location: $0.start, length: $0.length))
         }
-    }
-
-    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        webView.alpha = 1
-    }
-
-    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
-                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-        decisionHandler(navigationAction.navigationType == .linkActivated ? .cancel : .allow)
-    }
-}
-
-// MARK: - Seitenzählung
-
-/// Lädt jede Kapiteldatei unsichtbar und zählt die Seiten.
-@MainActor
-final class Paginator: NSObject, WKNavigationDelegate {
-    private var continuation: CheckedContinuation<Void, Never>?
-
-    func count(files: [URL], root: URL, layout: PageLayout, theme: ReadingTheme,
-               progress: @escaping (Double) -> Void) async -> [Int] {
-        let controller = WKUserContentController()
-        controller.addUserScript(ReaderJS.viewportScript(width: layout.pageWidth))
-        let config = WKWebViewConfiguration()
-        config.userContentController = controller
-        let webView = WKWebView(frame: CGRect(origin: .zero, size: layout.size), configuration: config)
-        webView.navigationDelegate = self
-        webView.alpha = 0.01
-        webView.isUserInteractionEnabled = false
-        attach(webView)
-        defer { webView.removeFromSuperview() }
-
-        var result: [Int] = []
-        for (index, url) in files.enumerated() {
-            if Task.isCancelled { return [] }
-            await load(url, root: root, in: webView)
-            var pages = 1
-            let value = try? await webView.callAsyncJavaScript(
-                ReaderJS.body,
-                arguments: ReaderJS.arguments(layout: layout, theme: theme, page: 0),
-                in: nil,
-                contentWorld: .page
-            )
-            if let number = value as? NSNumber {
-                pages = max(1, number.intValue)
-            }
-            result.append(pages)
-            progress(Double(index + 1) / Double(max(1, files.count)))
-        }
-        return result
-    }
-
-    private func attach(_ webView: WKWebView) {
-        let window = UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .filter { $0.session.role == .windowApplication }
-            .flatMap { $0.windows }
-            .first { $0.isKeyWindow }
-        window?.insertSubview(webView, at: 0)
-    }
-
-    private func load(_ url: URL, root: URL, in webView: WKWebView) async {
-        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            self.continuation = cont
-            webView.loadFileURL(url, allowingReadAccessTo: root)
-        }
-    }
-
-    private func finishLoading() {
-        let cont = continuation
-        continuation = nil
-        cont?.resume()
-    }
-
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        finishLoading()
-    }
-
-    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        finishLoading()
-    }
-
-    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        finishLoading()
-    }
-
-    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        finishLoading()
+        Haptics.medium()
+        model.select(TextSelection(
+            chapter: info.chapter,
+            word: word,
+            sentence: existing.map { NSRange(location: $0.start, length: $0.length) } ?? sentence,
+            wordText: chapterLayout.string(in: word),
+            sentenceText: existing?.text ?? chapterLayout.string(in: sentence),
+            highlightID: existing?.id
+        ))
     }
 }

@@ -9,6 +9,7 @@ struct JumpTarget: Equatable {
 final class ReaderModel: ObservableObject {
     let root: URL
     let files: [URL]
+    let engine: BookEngine
     var toc: [TOCEntry] = []
 
     @Published var counts: [Int] = []
@@ -23,17 +24,28 @@ final class ReaderModel: ObservableObject {
     @Published var page = 0
     @Published var chrome = true
     @Published var pendingJump: JumpTarget?
+    @Published var selection: TextSelection?
+    /// Wird erhöht, wenn sich Markierungen, Auswahl oder Lesezeichen ändern.
+    @Published var decorVersion = 0
+
+    var bookmarks: [Bookmark] = []
+    var highlights: [Highlight] = []
 
     var startChapter: Int
     var startFraction: Double
     var onPosition: ((Int, Double, Double) -> Void)?
+    var onToggleBookmark: ((Int) -> Void)?
+    /// Vom Blätter-Controller gesetzt, damit auch Schaltflächen umblättern können.
+    var turnHandler: ((Bool) -> Void)?
 
     private var offsets: [Int] = []
+    private var pagination: Pagination?
     private var task: Task<Void, Never>?
 
     init(root: URL, files: [URL], chapter: Int, fraction: Double, theme: ReadingTheme) {
         self.root = root
         self.files = files
+        self.engine = BookEngine(root: root, files: files)
         self.theme = theme
         self.chapter = chapter
         self.startChapter = chapter
@@ -61,11 +73,20 @@ final class ReaderModel: ObservableObject {
         return nil
     }
 
+    /// Anteil des Kapiteltexts, der vor dieser Seite liegt.
+    func fraction(chapter: Int, page: Int) -> Double {
+        guard let pagination, chapter < pagination.starts.count, page < pagination.starts[chapter].count else { return 0 }
+        return Double(pagination.starts[chapter][page]) / Double(max(1, pagination.lengths[chapter]))
+    }
+
     func globalIndex(chapter: Int, fraction: Double) -> Int {
-        guard !counts.isEmpty else { return 0 }
+        guard let pagination, !counts.isEmpty else { return 0 }
         let target = min(max(0, chapter), counts.count - 1)
-        let count = counts[target]
-        let page = min(count - 1, max(0, Int(fraction * Double(count) + 0.0001)))
+        let offset = Int(fraction * Double(pagination.lengths[target]) + 0.5)
+        var page = 0
+        for (candidate, start) in pagination.starts[target].enumerated() where start <= offset {
+            page = candidate
+        }
         return offsets[target] + page
     }
 
@@ -86,38 +107,39 @@ final class ReaderModel: ObservableObject {
     private func captureStart() {
         if !counts.isEmpty, chapter < counts.count {
             startChapter = chapter
-            startFraction = Double(page) / Double(max(1, counts[chapter]))
+            startFraction = fraction(chapter: chapter, page: page)
         }
     }
 
-    /// Neue Geometrie oder Schrift: Seiten neu zählen, Leseposition behalten.
+    /// Neue Geometrie oder Schrift: Seiten neu aufteilen, Leseposition behalten.
     func update(layout newLayout: PageLayout) {
         if newLayout == layout { return }
         captureStart()
         layout = newLayout
         counts = []
         offsets = []
+        pagination = nil
         isPaginating = true
         progressValue = 0
         task?.cancel()
+        engine.configure(layout: newLayout, theme: theme)
 
-        let paginator = Paginator()
-        let files = self.files
-        let root = self.root
         let theme = self.theme
         task = Task { [weak self] in
-            let result = await paginator.count(files: files, root: root, layout: newLayout, theme: theme) { value in
+            guard let engine = self?.engine else { return }
+            let result = await engine.paginate(layout: newLayout, theme: theme) { value in
                 self?.progressValue = value
             }
-            guard !Task.isCancelled, let self, result.count == files.count else { return }
+            guard !Task.isCancelled, let self, let result, self.layout == newLayout else { return }
             var running = 0
             var prefix: [Int] = []
-            for count in result {
+            for pages in result.starts {
                 prefix.append(running)
-                running += count
+                running += max(1, pages.count)
             }
+            self.pagination = result
             self.offsets = prefix
-            self.counts = result
+            self.counts = result.starts.map { max(1, $0.count) }
             self.isPaginating = false
             self.version += 1
         }
@@ -127,6 +149,9 @@ final class ReaderModel: ObservableObject {
         guard newTheme != theme else { return }
         captureStart()
         theme = newTheme
+        if let layout {
+            engine.configure(layout: layout, theme: newTheme)
+        }
         if !counts.isEmpty { version += 1 }
     }
 
@@ -137,8 +162,9 @@ final class ReaderModel: ObservableObject {
         index = newIndex
         chapter = location.chapter
         page = location.page
-        let fraction = Double(location.page) / Double(max(1, counts[location.chapter]))
-        onPosition?(location.chapter, fraction, progress)
+        onPosition?(location.chapter, fraction(chapter: location.chapter, page: location.page), progress)
+        engine.prefetch(location.chapter + 1)
+        engine.prefetch(location.chapter - 1)
     }
 
     func jump(toGlobalFraction value: Double) {
@@ -151,5 +177,45 @@ final class ReaderModel: ObservableObject {
     func jump(chapter: Int, fraction: Double) {
         guard !counts.isEmpty else { return }
         pendingJump = JumpTarget(index: globalIndex(chapter: chapter, fraction: fraction))
+    }
+
+    // MARK: Lesezeichen, Markierungen, Auswahl
+
+    func pageRange(chapter: Int, page: Int) -> NSRange? {
+        guard let pagination, chapter >= 0, chapter < pagination.starts.count,
+              page >= 0, page < pagination.starts[chapter].count else { return nil }
+        let start = pagination.starts[chapter][page]
+        let end = page + 1 < pagination.starts[chapter].count ? pagination.starts[chapter][page + 1] : pagination.lengths[chapter]
+        return NSRange(location: start, length: max(1, end - start))
+    }
+
+    func fraction(chapter: Int, offset: Int) -> Double {
+        guard let pagination, chapter >= 0, chapter < pagination.lengths.count else { return 0 }
+        return Double(offset) / Double(max(1, pagination.lengths[chapter]))
+    }
+
+    func bookmark(chapter: Int, page: Int) -> Bookmark? {
+        guard let pagination, let range = pageRange(chapter: chapter, page: page) else { return nil }
+        let length = Double(pagination.lengths[chapter])
+        return bookmarks.first {
+            $0.chapter == chapter && NSLocationInRange(Int($0.fraction * length + 0.5), range)
+        }
+    }
+
+    func hasBookmark(chapter: Int, range: NSRange) -> Bool {
+        guard let pagination, chapter < pagination.lengths.count else { return false }
+        let length = Double(pagination.lengths[chapter])
+        return bookmarks.contains {
+            $0.chapter == chapter && NSLocationInRange(Int($0.fraction * length + 0.5), range)
+        }
+    }
+
+    func select(_ newSelection: TextSelection?) {
+        selection = newSelection
+        decorVersion += 1
+    }
+
+    func refreshDecor() {
+        decorVersion += 1
     }
 }
