@@ -112,22 +112,67 @@ jobs:
           UDID=$(echo "$LINE" | grep -oE '[0-9A-F]{8}-[0-9A-F-]{27}' | head -1)
           echo "::notice::Simulator: $(echo $LINE | cut -c1-80)"
           rm -rf /tmp/lesen-shots
+          mkdir -p /tmp/lesen-shots
           set +e
-          xcodebuild test \
-            -project Lesen.xcodeproj \
-            -scheme Preview \
-            -destination "platform=iOS Simulator,id=$UDID" \
-            -derivedDataPath build-sim \
-            CODE_SIGNING_ALLOWED=NO \
-            "SWIFT_ACTIVE_COMPILATION_CONDITIONS=\$(inherited) DEBUG DUO_HINGE DUO_COVER DUO_FOLD DUO_BAR" \
-            > test.log 2>&1
+          FLAGS="SWIFT_ACTIVE_COMPILATION_CONDITIONS=\$(inherited) DEBUG DUO_HINGE DUO_COVER DUO_FOLD DUO_BAR"
+          xcodebuild build-for-testing -project Lesen.xcodeproj -scheme Preview \
+            -destination "platform=iOS Simulator,id=$UDID" -derivedDataPath build-sim \
+            CODE_SIGNING_ALLOWED=NO "$FLAGS" > test.log 2>&1
           code=$?
+          xcrun simctl boot "$UDID" 2>/dev/null
+          xcrun simctl bootstatus "$UDID" -b > /dev/null 2>&1
+          HINGE="Tools/hinge/hinge -d $UDID"
+          echo "Klappwerkzeug: $($HINGE -v 2>&1)" > hinge.log
+
+          # Die Tests bitten per Markierungsdatei um ein Foto des ganzen Displays.
+          touch /tmp/lesen-watch
+          (
+            while [ -f /tmp/lesen-watch ]; do
+              for m in /tmp/lesen-shots/foto-*.bitte; do
+                [ -e "$m" ] || continue
+                n=$(basename "$m" .bitte)
+                $HINGE screenshot "/tmp/lesen-shots/$n.png" >> hinge.log 2>&1 \
+                  || xcrun simctl io "$UDID" screenshot "/tmp/lesen-shots/$n.png" >> hinge.log 2>&1
+                # Außendisplay zusätzlich, falls innen gelesen wird
+                xcrun simctl io "$UDID" screenshot --display=LCD "/tmp/lesen-shots/$n-aussendisplay.png" >> hinge.log 2>&1
+                rm -f "$m"
+              done
+              sleep 0.2
+            done
+          ) &
+
+          run_tests() {
+            xcodebuild test-without-building -project Lesen.xcodeproj -scheme Preview \
+              -destination "platform=iOS Simulator,id=$UDID" -derivedDataPath build-sim \
+              CODE_SIGNING_ALLOWED=NO "$@" >> test.log 2>&1
+            local result=$?
+            [ $result -ne 0 ] && code=$result
+          }
+
+          if [ $code -eq 0 ]; then
+            # 1. So wie der Simulator startet (zugeklappt): alle Tests
+            echo "== Lage: Start $($HINGE posture 2>&1 | tr '\n' ' ')" >> hinge.log
+            run_tests
+            # 2. Flach aufgeklappt und 3. halb aufgeklappt (Buchhaltung): echtes Display
+            for angle in 180 110 0; do
+              $HINGE $angle >> hinge.log 2>&1
+              sleep 4
+              echo "== Lage $angle: $($HINGE posture 2>&1 | tr '\n' ' ')" >> hinge.log
+              run_tests -only-testing:LesenTests/PreviewTests/testRealDevice
+              [ $angle = 180 ] && run_tests -only-testing:LesenTests/PreviewTests/testTurningShowsOnlyFinishedPages
+            done
+          fi
+          rm -f /tmp/lesen-watch
+          sleep 1
           grep -E "error:|Test Case .* (passed|failed)|Executed [0-9]+ tests|Fatal|crashed|Terminating" test.log | sed -E 's#^.*/(Lesen|Tests)/##' | sort -u | head -n 30 | while IFS= read -r line; do
             echo "::warning::[test] ${line}"
           done
           mkdir -p shots
           cp /tmp/lesen-shots/*.png shots/ 2>/dev/null
           cp /tmp/lesen-shots/messung.txt shots/ 2>/dev/null
+          cp hinge.log shots/klappen.txt 2>/dev/null
+          # Leere Fotos des ausgeschalteten Außendisplays aussortieren
+          find shots -name "*-aussendisplay.png" -size -40k -delete
           {
             echo "Exit $code"
             grep -E "error:|Test Case .* (passed|failed)|Executed [0-9]+ tests|Fatal|crashed|Terminating|XCTAssert" test.log | sed -E 's#^.*/(Lesen|Tests)/##' | sort -u | head -n 80

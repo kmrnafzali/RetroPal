@@ -27,6 +27,10 @@ struct ReaderMetrics: Equatable {
     static let empty = ReaderMetrics(pagerFrame: .zero, spread: false, pageWidth: 0, height: 0,
                                      padTop: 0, padBottom: 0, padInner: 0, padOuter: 0, panel: nil)
 
+    /// Platz für die Kopfzeile je Seite (in Bildschirmkoordinaten), wenn oben ohnehin ein Streifen
+    /// frei bleiben muss. Leer = Seitenzahl steht wie gewohnt unten.
+    var headers: [CGRect] = []
+
     static func make(full: CGSize, insets: UIEdgeInsets, fold: FoldInfo?, occlusions: [CGRect],
                      margin: Int) -> ReaderMetrics {
         guard full.width > 100, full.height > 100 else { return .empty }
@@ -50,24 +54,24 @@ struct ReaderMetrics: Equatable {
             spine = fold
         }
 
-        let spread = area.width >= 560
+        // Aufgeschlagenes Buch nur, wenn jede Seite breit genug zum Lesen bleibt.
+        let spread = area.width >= 800 || (spine != nil && area.width >= 560)
         var left = max(0, insets.left)
         var right = max(0, insets.right)
 
-        // Verdeckte Bereiche (z. B. Kamera), die nicht schon in der Safe Area liegen.
-        for hole in occlusions {
-            let clipped = hole.intersection(area)
-            if clipped.isNull || clipped.width < 1 || clipped.height < 1 { continue }
-            if clipped.maxX <= left || clipped.minX >= full.width - right { continue }
-            if clipped.maxY <= top || clipped.minY >= area.height - bottom { continue }
-            if clipped.maxY <= area.height * 0.3 {
-                top = max(top, clipped.maxY)
-            } else if clipped.minY >= area.height * 0.7 {
-                bottom = max(bottom, area.height - clipped.minY)
-            } else if clipped.midX < full.width * 0.5 {
-                left = max(left, clipped.maxX)
+        // Verdeckte Bereiche (Kamera, Statusfeld der Seitenleiste).
+        let holes = occlusions.map { $0.intersection(area) }.filter { !$0.isNull && $0.width >= 1 && $0.height >= 1 }
+        for hole in holes {
+            if hole.maxX <= left || hole.minX >= full.width - right { continue }
+            if hole.maxY <= top || hole.minY >= area.height - bottom { continue }
+            if hole.maxY <= area.height * 0.3 {
+                top = max(top, hole.maxY)
+            } else if hole.minY >= area.height * 0.7 {
+                bottom = max(bottom, area.height - hole.minY)
+            } else if hole.midX < full.width * 0.5 {
+                left = max(left, hole.maxX)
             } else {
-                right = max(right, full.width - clipped.minX)
+                right = max(right, full.width - hole.minX)
             }
         }
         top = min(top, 120)
@@ -75,10 +79,14 @@ struct ReaderMetrics: Equatable {
         left = min(left, 140)
         right = min(right, 140)
 
-        let padTop = max(30, Int(top.rounded(.up)) + 16)
-        let padBottom = max(44, Int(bottom.rounded(.up)) + 34)
+        // Bleibt oben ohnehin ein hoher Streifen frei, wandern Kapitel und Seitenzahl dorthin
+        // (wie die Kopfzeile in einem gedruckten Buch) und der Text reicht dafür weiter nach unten.
+        let headerMode = !holes.isEmpty && top >= 56
+        let padTop = headerMode ? Int(top.rounded(.up)) + 6 : max(30, Int(top.rounded(.up)) + (top >= 50 ? 8 : 16))
+        let padBottom = headerMode ? max(22, Int(bottom.rounded(.up)) + 12) : max(44, Int(bottom.rounded(.up)) + 34)
         let height = Int(area.height.rounded(.down))
 
+        var result: ReaderMetrics
         if spread {
             let centre = spine?.frame.midX ?? full.width / 2
             let half = floor(min(centre, full.width - centre))
@@ -90,22 +98,61 @@ struct ReaderMetrics: Equatable {
             // Am Falz bleibt dessen Sicherheitsabstand frei, dazu ein schmaler Bundsteg.
             let gutter = max(16, Int(((spine?.frame.width ?? 32) / 2).rounded(.up)))
             let inner = gutter + max(10, margin / 2)
-            return ReaderMetrics(pagerFrame: pager, spread: true, pageWidth: Int(half), height: height,
-                                 padTop: padTop, padBottom: padBottom, padInner: inner, padOuter: outer, panel: panel)
+            result = ReaderMetrics(pagerFrame: pager, spread: true, pageWidth: Int(half), height: height,
+                                   padTop: padTop, padBottom: padBottom, padInner: inner, padOuter: outer, panel: panel)
+        } else {
+            let width = Int(area.width.rounded(.down))
+            let pager = CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height))
+            var inner = Int(left.rounded(.up)) + margin
+            var outer = Int(right.rounded(.up)) + margin
+            // Sehr breite Einzelseite: Zeilen nicht länger als gut lesbar.
+            let extra = (width - inner - outer - 620) / 2
+            if extra > 0 {
+                inner += extra
+                outer += extra
+            }
+            result = ReaderMetrics(pagerFrame: pager, spread: false, pageWidth: width, height: height,
+                                   padTop: padTop, padBottom: padBottom, padInner: inner, padOuter: outer, panel: panel)
         }
 
-        let width = Int(area.width.rounded(.down))
-        let pager = CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height))
-        return ReaderMetrics(pagerFrame: pager, spread: false, pageWidth: width, height: height,
-                             padTop: padTop, padBottom: padBottom,
-                             padInner: Int(left.rounded(.up)) + margin, padOuter: Int(right.rounded(.up)) + margin,
-                             panel: panel)
+        if headerMode {
+            let layout = result.layout(fontSize: 18, font: .iowan, lineHeight: 1.5, margin: margin)
+            let lineY = CGFloat(padTop) - 30
+            result.headers = result.textRects(layout).map { column in
+                // Freies Stück der Zeile neben den verdeckten Bereichen suchen
+                var free = [(column.minX, column.maxX)]
+                for hole in holes where hole.maxY > lineY - 4 && hole.minY < lineY + 20 {
+                    var next: [(CGFloat, CGFloat)] = []
+                    for (start, end) in free {
+                        if hole.maxX <= start || hole.minX >= end {
+                            next.append((start, end))
+                            continue
+                        }
+                        if hole.minX - 10 > start { next.append((start, hole.minX - 10)) }
+                        if hole.maxX + 10 < end { next.append((hole.maxX + 10, end)) }
+                    }
+                    free = next
+                }
+                guard let best = free.max(by: { $0.1 - $0.0 < $1.1 - $1.0 }), best.1 - best.0 >= 110 else {
+                    return CGRect.zero
+                }
+                return CGRect(x: best.0, y: lineY, width: best.1 - best.0, height: 16)
+            }
+        }
+        return result
     }
 
     func layout(fontSize: Int, font: ReadingFont, lineHeight: Double, margin: Int) -> PageLayout {
         PageLayout(pageWidth: pageWidth, height: height, spread: spread, fontSize: fontSize, font: font,
                    lineHeight: lineHeight, margin: margin, padTop: padTop, padBottom: padBottom,
-                   padInner: padInner, padOuter: padOuter)
+                   padInner: padInner, padOuter: padOuter, headers: pageHeaders)
+    }
+
+    /// Kopfzeilen in Seitenkoordinaten (für die linke bzw. einzige und die rechte Seite).
+    var pageHeaders: [CGRect] {
+        headers.enumerated().map { index, rect in
+            rect.width <= 0 ? .zero : rect.offsetBy(dx: -pagerFrame.minX - CGFloat(index * pageWidth), dy: -pagerFrame.minY)
+        }
     }
 
     /// Textflächen aller Seiten in Bildschirmkoordinaten (für Tests und Diagnose).

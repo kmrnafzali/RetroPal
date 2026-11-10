@@ -92,35 +92,39 @@ struct ReaderView: View {
 
             // Das Buch nutzt den ganzen Bildschirm. Ränder, Falz und verdeckte Bereiche
             // werden als Seitenränder eingerechnet, statt die Fläche zu verkleinern.
-            GeometryReader { geo in
-                let metrics = computeMetrics(geo)
-                ZStack(alignment: .topLeading) {
-                    if metrics.pageWidth > 0 {
-                        PagerView(model: model, spread: metrics.spread)
-                            .id(metrics.spread)
-                            .frame(width: metrics.pagerFrame.width, height: metrics.pagerFrame.height)
-                            .offset(x: metrics.pagerFrame.minX, y: metrics.pagerFrame.minY)
+            GeometryReader { safe in
+                // Außen: die echten Ränder. Innen: der ganze Bildschirm samt Falz und verdeckten Bereichen.
+                let insets = safe.safeAreaInsets
+                GeometryReader { geo in
+                    let metrics = computeMetrics(geo, insets: insets)
+                    ZStack(alignment: .topLeading) {
+                        if metrics.pageWidth > 0 {
+                            PagerView(model: model, spread: metrics.spread)
+                                .id(metrics.spread)
+                                .frame(width: metrics.pagerFrame.width, height: metrics.pagerFrame.height)
+                                .offset(x: metrics.pagerFrame.minX, y: metrics.pagerFrame.minY)
+                        }
+                        if let panel = metrics.panel {
+                            // Tisch-Modus: Seite oben, Steuerung unter dem Falz
+                            TabletopPanel(model: model, title: bookTitle, pageLabel: pageLabel,
+                                          onClose: close, onSettings: { showSettings = true },
+                                          onContents: { showContents = true })
+                                .frame(width: panel.width, height: panel.height)
+                                .offset(x: panel.minX, y: panel.minY)
+                        }
                     }
-                    if let panel = metrics.panel {
-                        // Tisch-Modus: Seite oben, Steuerung unter dem Falz
-                        TabletopPanel(model: model, title: bookTitle, pageLabel: pageLabel,
-                                      onClose: close, onSettings: { showSettings = true },
-                                      onContents: { showContents = true })
-                            .frame(width: panel.width, height: panel.height)
-                            .offset(x: panel.minX, y: panel.minY)
+                    .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
+                    .onAppear {
+                        configure(metrics, insets: insets, size: geo.size)
+                        noteGeometry(geo, metrics, insets: insets)
+                    }
+                    .onChange(of: metrics) { _, newMetrics in
+                        configure(newMetrics, insets: insets, size: geo.size)
+                        noteGeometry(geo, newMetrics, insets: insets)
                     }
                 }
-                .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
-                .onAppear {
-                    configure(metrics, insets: geo.safeAreaInsets, size: geo.size)
-                    noteGeometry(geo, metrics)
-                }
-                .onChange(of: metrics) { _, newMetrics in
-                    configure(newMetrics, insets: geo.safeAreaInsets, size: geo.size)
-                    noteGeometry(geo, newMetrics)
-                }
+                .ignoresSafeArea()
             }
-            .ignoresSafeArea()
 
             if theme == .candle {
                 CandleGlow()
@@ -261,8 +265,7 @@ struct ReaderView: View {
     // MARK: Layout
 
     /// Bildschirmmaße in Seitenmaße umrechnen.
-    private func computeMetrics(_ geo: GeometryProxy) -> ReaderMetrics {
-        let raw = geo.safeAreaInsets
+    private func computeMetrics(_ geo: GeometryProxy, insets raw: EdgeInsets) -> ReaderMetrics {
         var top = raw.top
         var bottom = raw.bottom
         if insetMemory.size == geo.size {
@@ -308,15 +311,14 @@ struct ReaderView: View {
         ))
     }
 
-    private func noteGeometry(_ geo: GeometryProxy, _ metrics: ReaderMetrics) {
-        let insets = geo.safeAreaInsets
+    private func noteGeometry(_ geo: GeometryProxy, _ metrics: ReaderMetrics, insets: EdgeInsets) {
         var lines = [
             "Bildschirm: \(Int(geo.size.width))×\(Int(geo.size.height)) pt",
             "Ränder: oben \(Int(insets.top)), unten \(Int(insets.bottom)), links \(Int(insets.leading)), rechts \(Int(insets.trailing))"
         ]
         lines.append(contentsOf: DuoFold.describe(geo))
         lines.append("Buch: \(metrics.spread ? "Doppelseite" : "Einzelseite"), Seite \(metrics.pageWidth)×\(metrics.height), ab x=\(Int(metrics.pagerFrame.minX))")
-        lines.append("Textrand: oben \(metrics.padTop), unten \(metrics.padBottom), innen \(metrics.padInner), außen \(metrics.padOuter)")
+        lines.append("Textrand: oben \(metrics.padTop), unten \(metrics.padBottom), innen \(metrics.padInner), außen \(metrics.padOuter)\(metrics.headers.isEmpty ? "" : ", Kopfzeile oben")")
         ReaderDiagnostics.shared.setGeometry(lines)
     }
 

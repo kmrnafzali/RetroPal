@@ -18,6 +18,9 @@ struct PageLayout: Equatable {
     /// Innen = zum Buchfalz hin (bei der Einzelseite: links). Außen = zum Displayrand hin (Einzelseite: rechts).
     var padInner = -1
     var padOuter = -1
+    /// Platz für Kapitel und Seitenzahl oben auf der linken (bzw. einzigen) und der rechten Seite.
+    /// Leer = sie stehen unten.
+    var headers: [CGRect] = []
 
     private var inner: Int { padInner >= 0 ? padInner : margin }
     private var outer: Int { padOuter >= 0 ? padOuter : margin }
@@ -157,7 +160,16 @@ enum PageRenderer {
         let spec = job.spec
         guard spec.number > 0 else { return }
         let side = spec.side
-        let text = job.layout.textRect(side)
+        var text = job.layout.textRect(side)
+        var y = text.maxY + 14
+        let headers = job.layout.headers
+        if !headers.isEmpty {
+            // Kopfzeile im freien Streifen oben
+            let line = headers[min(side == .right ? 1 : 0, headers.count - 1)]
+            guard line.width > 60 else { return }
+            text = line
+            y = line.minY
+        }
         let color = job.theme.footerColor
         let numberAttributes: [NSAttributedString.Key: Any] = [
             .font: UIFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium),
@@ -172,7 +184,6 @@ enum PageRenderer {
             .kern: 0.6,
             .paragraphStyle: titleStyle
         ]
-        let y = text.maxY + 14
         let number = "\(spec.number)" as NSString
         let numberSize = number.size(withAttributes: numberAttributes)
         let titleWidth = max(0, text.width - numberSize.width - 12)

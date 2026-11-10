@@ -268,29 +268,41 @@ final class PreviewTests: XCTestCase {
             var holes: [CGRect] = []
             var spread: Bool
         }
-        let centreFold = FoldInfo(frame: CGRect(x: 420, y: 0, width: 40, height: 960), isActive: false)
+        // Echte Maße aus dem iPhone-Duo-Simulator
+        let fold = FoldInfo(frame: CGRect(x: 455, y: 0, width: 40, height: 669), isActive: false)
+        let innerHoles = [CGRect(x: 0, y: 0, width: 84, height: 82), CGRect(x: 29, y: 29, width: 37, height: 37)]
+        let outerHoles = [CGRect(x: 266, y: 0, width: 200, height: 82), CGRect(x: 399, y: 29, width: 37, height: 37)]
         let cases = [
-            Case(name: "innen flach", full: CGSize(width: 880, height: 960),
-                 insets: UIEdgeInsets(top: 24, left: 0, bottom: 20, right: 0), fold: centreFold, spread: true),
-            Case(name: "innen mit Seitenleiste", full: CGSize(width: 880, height: 960),
-                 insets: UIEdgeInsets(top: 24, left: 0, bottom: 20, right: 84), fold: centreFold, spread: true),
-            Case(name: "innen, Falz außermittig", full: CGSize(width: 964, height: 960),
-                 insets: UIEdgeInsets(top: 24, left: 0, bottom: 20, right: 84), fold: centreFold, spread: true),
-            Case(name: "innen mit Kamera", full: CGSize(width: 880, height: 960),
-                 insets: UIEdgeInsets(top: 24, left: 0, bottom: 20, right: 0), fold: centreFold,
-                 holes: [CGRect(x: 20, y: 10, width: 50, height: 50)], spread: true),
-            Case(name: "innen halb aufgeklappt (Buch)", full: CGSize(width: 880, height: 960),
-                 insets: UIEdgeInsets(top: 24, left: 0, bottom: 20, right: 0),
-                 fold: FoldInfo(frame: centreFold.frame, isActive: true), spread: true),
-            Case(name: "innen quer", full: CGSize(width: 960, height: 880),
-                 insets: UIEdgeInsets(top: 24, left: 0, bottom: 20, right: 0), fold: nil, spread: true),
-            Case(name: "Tisch-Modus", full: CGSize(width: 960, height: 880),
-                 insets: UIEdgeInsets(top: 24, left: 0, bottom: 20, right: 0),
-                 fold: FoldInfo(frame: CGRect(x: 0, y: 420, width: 960, height: 40), isActive: true), spread: true),
-            Case(name: "außen", full: CGSize(width: 440, height: 956),
-                 insets: UIEdgeInsets(top: 59, left: 0, bottom: 34, right: 0), fold: nil, spread: false),
-            Case(name: "außen mit Seitenleiste", full: CGSize(width: 440, height: 956),
-                 insets: UIEdgeInsets(top: 59, left: 0, bottom: 34, right: 84), fold: nil, spread: false)
+            Case(name: "innen flach", full: CGSize(width: 951, height: 669),
+                 insets: UIEdgeInsets(top: 0, left: 0, bottom: 21, right: 0), fold: fold, holes: innerHoles, spread: true),
+            Case(name: "innen ohne gemeldete Bereiche", full: CGSize(width: 951, height: 669),
+                 insets: UIEdgeInsets(top: 24, left: 0, bottom: 21, right: 0), fold: nil, spread: true),
+            Case(name: "innen mit Seitenleiste", full: CGSize(width: 951, height: 669),
+                 insets: UIEdgeInsets(top: 0, left: 84, bottom: 21, right: 0), fold: fold, holes: innerHoles, spread: true),
+            Case(name: "innen, Falz außermittig", full: CGSize(width: 1035, height: 669),
+                 insets: UIEdgeInsets(top: 24, left: 0, bottom: 20, right: 84), fold: fold, spread: true),
+            Case(name: "innen halb aufgeklappt (Buch)", full: CGSize(width: 951, height: 669),
+                 insets: UIEdgeInsets(top: 0, left: 0, bottom: 21, right: 0),
+                 fold: FoldInfo(frame: fold.frame, isActive: true), holes: innerHoles, spread: true),
+            Case(name: "innen hochkant", full: CGSize(width: 669, height: 951),
+                 insets: UIEdgeInsets(top: 0, left: 0, bottom: 21, right: 0),
+                 fold: FoldInfo(frame: CGRect(x: 0, y: 455, width: 669, height: 40), isActive: false),
+                 holes: [CGRect(x: 585, y: 0, width: 84, height: 82)], spread: false),
+            Case(name: "Tisch-Modus", full: CGSize(width: 669, height: 951),
+                 insets: UIEdgeInsets(top: 0, left: 0, bottom: 21, right: 0),
+                 fold: FoldInfo(frame: CGRect(x: 0, y: 455, width: 669, height: 40), isActive: true),
+                 holes: [CGRect(x: 585, y: 0, width: 84, height: 82)], spread: false),
+            Case(name: "außen", full: CGSize(width: 466, height: 678),
+                 insets: UIEdgeInsets(top: 82, left: 0, bottom: 34, right: 0), fold: nil, holes: outerHoles, spread: false),
+            Case(name: "außen ohne Rand-Angabe", full: CGSize(width: 466, height: 678),
+                 insets: .zero, fold: nil, holes: outerHoles, spread: false),
+            Case(name: "außen quer", full: CGSize(width: 678, height: 466),
+                 insets: UIEdgeInsets(top: 0, left: 0, bottom: 21, right: 0), fold: nil,
+                 holes: [CGRect(x: 0, y: 0, width: 84, height: 82)], spread: false),
+            Case(name: "außen mit Seitenleiste", full: CGSize(width: 466, height: 678),
+                 insets: UIEdgeInsets(top: 82, left: 0, bottom: 34, right: 84), fold: nil, spread: false),
+            Case(name: "gewöhnliches iPhone", full: CGSize(width: 402, height: 874),
+                 insets: UIEdgeInsets(top: 62, left: 0, bottom: 34, right: 0), fold: nil, spread: false)
         ]
         for item in cases {
             for margin in [16, 26, 40] {
@@ -315,8 +327,21 @@ final class PreviewTests: XCTestCase {
                         XCTAssertFalse(rect.intersects(fold.frame), "Text im Falz: \(label)")
                     }
                     for hole in item.holes {
-                        XCTAssertFalse(rect.intersects(hole), "Text unter der Kamera: \(label)")
+                        XCTAssertFalse(rect.intersects(hole), "Text unter einem verdeckten Bereich: \(label)")
                     }
+                }
+                // Kopfzeilen liegen frei, über dem Text und innerhalb ihrer Seite
+                XCTAssertTrue(layout.headers.isEmpty || layout.headers.count == rects.count, label)
+                for (index, header) in metrics.headers.enumerated() where header.width > 0 {
+                    XCTAssertLessThanOrEqual(header.maxY, rects[index].minY, "Kopfzeile über dem Text: \(label)")
+                    XCTAssertGreaterThanOrEqual(header.minX, rects[index].minX - 0.5, label)
+                    XCTAssertLessThanOrEqual(header.maxX, rects[index].maxX + 0.5, label)
+                    for hole in item.holes {
+                        XCTAssertFalse(header.intersects(hole), "Kopfzeile unter einem verdeckten Bereich: \(label)")
+                    }
+                    let local = layout.headers[index]
+                    XCTAssertGreaterThanOrEqual(local.minX, 0, label)
+                    XCTAssertLessThanOrEqual(local.maxX, CGFloat(metrics.pageWidth), label)
                 }
                 if item.spread, rects.count == 2 {
                     let centre = (item.fold?.frame.height ?? 0) >= (item.fold?.frame.width ?? 1)
@@ -335,7 +360,9 @@ final class PreviewTests: XCTestCase {
     /// gezeichnet und kein Kapitel erst dann gesetzt wird.
     func testTurningShowsOnlyFinishedPages() throws {
         let library = Library()
-        let book = try makeBook(title: "Der Hafen im Nebel", author: "Anna Beispiel", chapters: 12, progress: 0)
+        var book = try makeBook(title: "Der Hafen im Nebel", author: "Anna Beispiel", chapters: 12, progress: 0)
+        // Kurz vor dem Kapitelende einsteigen, damit sicher über Kapitelgrenzen geblättert wird.
+        book.fraction = 0.7
         library.addForTesting(book)
         ReaderDiagnostics.shared.reset()
 
@@ -377,7 +404,7 @@ final class PreviewTests: XCTestCase {
 
         XCTAssertGreaterThanOrEqual(forward, 14, "Vorwärtsblättern muss funktionieren")
         XCTAssertGreaterThanOrEqual(backward, 4, "Zurückblättern muss funktionieren")
-        XCTAssertGreaterThan(model.chapter, 1, "Es wurde über Kapitelgrenzen geblättert")
+        XCTAssertGreaterThan(model.chapter, 0, "Es wurde über eine Kapitelgrenze geblättert")
         XCTAssertEqual(ReaderDiagnostics.shared.syncRenderCount, 0, "Keine Seite darf erst beim Blättern gezeichnet werden")
         XCTAssertEqual(ReaderDiagnostics.shared.mainBuildCount, 0, "Kein Kapitel darf erst beim Blättern gesetzt werden")
         XCTAssertFalse(ReaderDiagnostics.shared.hasMismatch, "Seitenfläche und berechnete Seite müssen übereinstimmen")
@@ -402,8 +429,9 @@ final class PreviewTests: XCTestCase {
         library.toggleShelf("Lieblinge", for: books[2].id)
         library.toggleShelf("Lieblinge", for: books[3].id)
 
-        let outer = CGSize(width: 440, height: 956)
-        let inner = CGSize(width: 880, height: 960)
+        // Maße des iPhone Duo: Außendisplay hochkant, Innendisplay quer mit dem Falz in der Mitte.
+        let outer = CGSize(width: 466, height: 678)
+        let inner = CGSize(width: 951, height: 669)
 
         snapshot(LibraryView().environmentObject(library), size: outer, name: "1-bibliothek-aussen", delay: 1.5)
         snapshot(LibraryView().environmentObject(library), size: inner, name: "2-bibliothek-innen", delay: 1.5)
@@ -431,9 +459,34 @@ final class PreviewTests: XCTestCase {
                                                          progress: 0.1)),
                  size: outer, name: "12-cover-aussen-ersatz", delay: 1)
 
-        // Echter Simulator-Bildschirm mit seinen echten Rändern, hoch und quer
+    }
+
+    /// Wartet, bis der Build-Rechner ein Foto des ganzen Simulator-Displays gemacht hat
+    /// (mit Statusfeld und Seitenleiste, die im eigenen Fenster nicht zu sehen sind).
+    private func systemShot(_ name: String) {
+        try? FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        let marker = output.appendingPathComponent("foto-\(name).bitte")
+        try? Data().write(to: marker)
+        let deadline = Date().addingTimeInterval(10)
+        while FileManager.default.fileExists(atPath: marker.path), Date() < deadline {
+            wait(0.2)
+        }
+        try? FileManager.default.removeItem(at: marker)
+    }
+
+    /// Zeigt Regal und Leser auf dem echten Simulator-Display in seiner aktuellen Lage
+    /// (zugeklappt, aufgeklappt, halb aufgeklappt), hoch und quer.
+    func testRealDevice() throws {
+        let library = Library()
+        var books: [Book] = []
+        for (title, author, progress) in [("Der Hafen im Nebel", "Anna Beispiel", 0.42), ("Zwei Laternen", "Bernd Muster", 0.0),
+                                          ("Nordwind", "David Test", 0.12)] {
+            let book = try makeBook(title: title, author: author, chapters: 4, progress: progress, withCover: title == "Nordwind")
+            library.addForTesting(book)
+            books.append(book)
+        }
         if let scene {
-            note("Simulator-Bildschirm: \(scene.screen.bounds.size), Szene: \(scene.coordinateSpace.bounds.size)")
+            note("== Simulator-Bildschirm \(scene.screen.bounds.size), Szene \(scene.coordinateSpace.bounds.size)")
         }
         for (mask, name) in [(UIInterfaceOrientationMask.portrait, "hoch"), (.landscapeRight, "quer")] {
             rotate(mask)
@@ -441,14 +494,25 @@ final class PreviewTests: XCTestCase {
             let window = present(ReaderView(book: books[0], onClose: {}).environmentObject(library), size: nil)
             let model = waitUntilReady()
             wait(2)
-            model?.chrome = false
-            wait(0.8)
-            capture(window, name: "7-lesen-echt-\(name)")
-            note("Echt \(name): Fenster \(Int(window.bounds.width))×\(Int(window.bounds.height)), Ränder \(window.safeAreaInsets)")
-            for line in ReaderDiagnostics.shared.summary(maximumRate: UIScreen.main.maximumFramesPerSecond).suffix(6) {
-                note("Echt \(name): \(line)")
+            let lines = ReaderDiagnostics.shared.summary(maximumRate: UIScreen.main.maximumFramesPerSecond)
+            let half = lines.contains { $0.hasPrefix("Falz") && $0.hasSuffix("aktiv") }
+            let tag = "echt-\(Int(window.bounds.width))x\(Int(window.bounds.height))\(half ? "-halb" : "")"
+            note("\(tag) (\(name)): UIKit-Ränder \(window.safeAreaInsets)")
+            for line in lines.suffix(7) {
+                note("\(tag): \(line)")
             }
+            systemShot("\(tag)-lesen-mit-leiste")
+            model?.chrome = false
+            wait(1)
+            capture(window, name: "\(tag)-lesen")
+            systemShot("\(tag)-lesen-system")
+            XCTAssertFalse(ReaderDiagnostics.shared.hasMismatch, "Seitenfläche und berechnete Seite müssen übereinstimmen (\(tag))")
             dismiss(window)
+
+            let shelf = present(LibraryView().environmentObject(library), size: nil)
+            wait(1.5)
+            systemShot("\(tag)-regal-system")
+            dismiss(shelf)
         }
         rotate(.portrait)
     }
